@@ -1,6 +1,7 @@
 #include "FanCurveModel.h"
 #include "ConfigStore.h"
 #include "FanConfig.h"
+#include "FanControlLogic.h"
 #include "PresetMatcher.h"
 #include "PresetStore.h"
 #include "SingleInstance.h"
@@ -28,6 +29,18 @@ void Expect(bool condition, const char* message)
 	{
 		throw std::runtime_error(message);
 	}
+}
+
+void TestForcedCoolingCompletion()
+{
+	Expect(!ShouldCompleteForcedCooling(false, 40, 40, 50),
+		"disabled forced cooling must not complete");
+	Expect(!ShouldCompleteForcedCooling(true, 50, 40, 50),
+		"CPU temperature at the threshold must keep forced cooling active");
+	Expect(!ShouldCompleteForcedCooling(true, 49, 50, 50),
+		"GPU temperature at the threshold must keep forced cooling active");
+	Expect(ShouldCompleteForcedCooling(true, 49, 49, 50),
+		"both temperatures below the threshold should complete forced cooling");
 }
 
 bool SamePoints(const FanCurvePoints& left, const FanCurvePoints& right)
@@ -901,6 +914,7 @@ int main()
 {
 	try
 	{
+		TestForcedCoolingCompletion();
 		TestDefaultCurve();
 		TestValidationBoundaries();
 		TestInvalidEvaluationAndNullArguments();

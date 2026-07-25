@@ -23,6 +23,7 @@ public:
 	DWORD m_dwCoreThreadId;
 	UINT_PTR m_nUiTimerId;
 	int m_nLastCoreUpdateTime;
+	LONG m_nLastForceCoolingCompletionSequence;
 	BOOL m_bWindowVisible;
 	BOOL m_bTrayAdded;
 	BOOL m_bStartupPending;
@@ -117,6 +118,7 @@ protected:
 	void SetInitialWindowSize();
 	int ScaleX(int value) const;
 	int ScaleY(int value) const;
+	void SyncForceCoolingCompletion(const CCoreStatusSnapshot& status);
 	void RefreshStatus();
 	void RefreshCurves();
 	void LoadDraftFromCore();

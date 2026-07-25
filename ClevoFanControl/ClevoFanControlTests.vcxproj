@@ -83,6 +83,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="FanCurveModelTests.cpp" />
+    <ClCompile Include="FanControlLogic.cpp" />
     <ClCompile Include="FanCurveModel.cpp" />
     <ClCompile Include="FanConfig.cpp" />
     <ClCompile Include="ConfigStore.cpp" />

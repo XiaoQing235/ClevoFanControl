@@ -38,6 +38,7 @@ struct CCoreStatusSnapshot
 	int targetCurveLevel[2];
 	int lastUpdateTime;
 	BOOL forcedCooling;
+	LONG forceCoolingCompletionSequence;
 	BOOL gpuAvailable;
 };
 
@@ -74,6 +75,7 @@ public:
 	BOOL m_bUpdateRPM;
 	int m_nLastUpdateTime;
 	BOOL m_bForcedCooling;
+	volatile LONG m_nForceCoolingCompletionSequence;
 	BOOL m_bTakeOverStatus;
 	BOOL m_bForcedRefresh;
 

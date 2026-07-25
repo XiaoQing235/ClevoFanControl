@@ -107,6 +107,7 @@
     <ClInclude Include="ConfigStore.h" />
     <ClInclude Include="JsonValue.h" />
     <ClInclude Include="FanConfig.h" />
+    <ClInclude Include="FanControlLogic.h" />
     <ClInclude Include="FanCurveModel.h" />
     <ClInclude Include="FanCurveCtrl.h" />
     <ClInclude Include="PresetMatcher.h" />
@@ -129,6 +130,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="FanConfig.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="FanControlLogic.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="FanCurveModel.cpp">

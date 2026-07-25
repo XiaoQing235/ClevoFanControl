@@ -120,6 +120,7 @@ CClevoFanControlDlg::CClevoFanControlDlg(CWnd* pParent)
 	m_dwCoreThreadId = 0;
 	m_nUiTimerId = 0;
 	m_nLastCoreUpdateTime = -1;
+	m_nLastForceCoolingCompletionSequence = 0;
 	m_bWindowVisible = FALSE;
 	m_bTrayAdded = FALSE;
 	m_bStartupPending = TRUE;
@@ -886,6 +887,21 @@ void CClevoFanControlDlg::SetInitialWindowSize()
 		SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+void CClevoFanControlDlg::SyncForceCoolingCompletion(const CCoreStatusSnapshot& status)
+{
+	if (status.forceCoolingCompletionSequence == m_nLastForceCoolingCompletionSequence)
+	{
+		return;
+	}
+	m_nLastForceCoolingCompletionSequence = status.forceCoolingCompletionSequence;
+	if (!status.forcedCooling && m_draft.ForceCooling)
+	{
+		m_draft.ForceCooling = false;
+		m_ctlForcedCooling.SetCheck(BST_UNCHECKED);
+		SetDraftDirty(TRUE);
+	}
+}
+
 void CClevoFanControlDlg::RefreshStatus()
 {
 	if (m_ctlStatus.GetSafeHwnd() == NULL)
@@ -953,6 +969,7 @@ void CClevoFanControlDlg::OnTimer(UINT_PTR nIDEvent)
 	{
 		return;
 	}
+	SyncForceCoolingCompletion(status);
 	if (status.lastUpdateTime != m_nLastCoreUpdateTime)
 	{
 		m_nLastCoreUpdateTime = status.lastUpdateTime;

@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Core.h"
+#include "FanControlLogic.h"
 
 #ifdef max
 #undef max
@@ -163,6 +164,7 @@ CCore::CCore()
 	m_bUpdateRPM = FALSE;
 	m_nLastUpdateTime = GetTime(NULL, -5);
 	m_bForcedCooling = FALSE;
+	m_nForceCoolingCompletionSequence = 0;
 	m_bTakeOverStatus = FALSE;
 	m_bForcedRefresh = FALSE;
 }
@@ -369,6 +371,8 @@ BOOL CCore::GetStatusSnapshot(CCoreStatusSnapshot* output) const
 	output->lastUpdateTime = static_cast<int>(InterlockedCompareExchange(
 		reinterpret_cast<volatile LONG*>(const_cast<int*>(&m_nLastUpdateTime)), 0, 0));
 	output->forcedCooling = m_bForcedCooling;
+	output->forceCoolingCompletionSequence = InterlockedCompareExchange(
+		const_cast<volatile LONG*>(&m_nForceCoolingCompletionSequence), 0, 0);
 	output->gpuAvailable = m_bFanAvailable[1] && output->ecReady;
 	LeaveCriticalSection(&m_csFanControl);
 	return TRUE;
@@ -615,7 +619,8 @@ void CCore::Work()
 	EnterCriticalSection(&m_csFanControl);
 	if (m_bForcedCooling)
 	{
-		if (m_nCurTemp[0] >= config.ForceTemp || m_nCurTemp[1] >= config.ForceTemp)
+		if (!ShouldCompleteForcedCooling(m_bForcedCooling != FALSE,
+			m_nCurTemp[0], m_nCurTemp[1], config.ForceTemp))
 		{
 			forcedCoolingActive = TRUE;
 			if (m_nSetDuty[0] < 100 || m_nSetDuty[1] < 100)
@@ -635,6 +640,7 @@ void CCore::Work()
 		else
 		{
 			m_bForcedCooling = FALSE;
+			InterlockedIncrement(&m_nForceCoolingCompletionSequence);
 		}
 	}
 	LeaveCriticalSection(&m_csFanControl);

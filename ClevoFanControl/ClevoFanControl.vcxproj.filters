@@ -45,6 +45,9 @@
     <ClInclude Include="FanConfig.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="FanControlLogic.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="FanCurveModel.h">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -87,6 +90,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="FanConfig.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="FanControlLogic.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="FanCurveModel.cpp">
