@@ -2187,7 +2187,6 @@ BOOL CClevoFanControlDlg::CreateTaskXml(PCSTR strXmlPath, PCSTR strTargetPath)
 	if (file == INVALID_HANDLE_VALUE)
 	{
 		const DWORD error = GetLastError();
-		DeleteFileA(strXmlPath);
 		TRACE("Task XML file creation failed with Windows error %lu.\n", error);
 		SetLastError(error);
 		return FALSE;

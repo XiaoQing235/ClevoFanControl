@@ -24,30 +24,81 @@ const wchar_t kTaskXmlSuffix[] =
 	L"</Command></Exec></Actions>\r\n"
 	L"</Task>\r\n";
 
-bool Fail(const char* message, std::string* diagnostic)
+void SetDiagnosticNoThrow(std::string* diagnostic, const char* message) noexcept
 {
-	if (diagnostic != nullptr)
+	if (diagnostic == nullptr)
 	{
-		*diagnostic = message;
+		return;
 	}
+	try
+	{
+		diagnostic->assign(message);
+	}
+	catch (...)
+	{
+		diagnostic->clear();
+	}
+}
+
+bool Fail(const char* message, std::string* diagnostic) noexcept
+{
+	SetDiagnosticNoThrow(diagnostic, message);
 	return false;
 }
 
-bool FailConversion(const char* operation, DWORD error, std::string* diagnostic)
+bool FailConversion(bool calculatingSize, DWORD error, std::string* diagnostic) noexcept
 {
-	if (diagnostic != nullptr)
+	if (error == ERROR_NO_UNICODE_TRANSLATION)
 	{
-		if (error == ERROR_NO_UNICODE_TRANSLATION)
+		return Fail("Task XML contains invalid Unicode and cannot be encoded as UTF-8.", diagnostic);
+	}
+	return Fail(calculatingSize ?
+		"WideCharToMultiByte failed while calculating the UTF-8 task XML size." :
+		"WideCharToMultiByte failed while encoding the task XML as UTF-8.", diagnostic);
+}
+
+bool IsHighSurrogate(unsigned int codeUnit)
+{
+	return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+bool IsLowSurrogate(unsigned int codeUnit)
+{
+	return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+}
+
+bool IsXml10BmpCharacter(unsigned int codeUnit)
+{
+	return codeUnit == 0x0009 || codeUnit == 0x000a || codeUnit == 0x000d ||
+		(codeUnit >= 0x0020 && codeUnit <= 0xd7ff) ||
+		(codeUnit >= 0xe000 && codeUnit <= 0xfffd);
+}
+
+bool ValidateXml10Characters(const std::wstring& text, std::string* diagnostic) noexcept
+{
+	for (size_t i = 0; i < text.size(); ++i)
+	{
+		const unsigned int codeUnit = static_cast<unsigned int>(text[i]);
+		if (IsHighSurrogate(codeUnit))
 		{
-			*diagnostic = "Task XML contains invalid Unicode and cannot be encoded as UTF-8.";
+			if (i + 1 >= text.size() ||
+				!IsLowSurrogate(static_cast<unsigned int>(text[i + 1])))
+			{
+				return Fail("Task XML target path contains an unpaired UTF-16 surrogate.", diagnostic);
+			}
+			++i;
+			continue;
 		}
-		else
+		if (IsLowSurrogate(codeUnit))
 		{
-			*diagnostic = std::string(operation) + " failed with Windows error " +
-				std::to_string(static_cast<unsigned long>(error)) + ".";
+			return Fail("Task XML target path contains an unpaired UTF-16 surrogate.", diagnostic);
+		}
+		if (!IsXml10BmpCharacter(codeUnit))
+		{
+			return Fail("Task XML target path contains a character prohibited by XML 1.0.", diagnostic);
 		}
 	}
-	return false;
+	return true;
 }
 
 size_t EscapedCharacterLength(wchar_t character)
@@ -102,6 +153,10 @@ bool BuildTaskXmlUtf8(
 	{
 		return Fail("Task XML output pointer must not be null.", diagnostic);
 	}
+	if (!ValidateXml10Characters(targetPath, diagnostic))
+	{
+		return false;
+	}
 
 	const size_t prefixLength = (sizeof(kTaskXmlPrefix) / sizeof(kTaskXmlPrefix[0])) - 1;
 	const size_t suffixLength = (sizeof(kTaskXmlSuffix) / sizeof(kTaskXmlSuffix[0])) - 1;
@@ -134,7 +189,7 @@ bool BuildTaskXmlUtf8(
 			CP_UTF8, WC_ERR_INVALID_CHARS, document.c_str(), sourceLength, nullptr, 0, nullptr, nullptr);
 		if (requiredBytes == 0)
 		{
-			return FailConversion("UTF-8 size calculation", GetLastError(), diagnostic);
+			return FailConversion(true, GetLastError(), diagnostic);
 		}
 
 		std::string utf8(static_cast<size_t>(requiredBytes), '\0');
@@ -144,7 +199,7 @@ bool BuildTaskXmlUtf8(
 		if (bytesWritten != requiredBytes)
 		{
 			const DWORD error = bytesWritten == 0 ? GetLastError() : ERROR_INVALID_DATA;
-			return FailConversion("UTF-8 conversion", error, diagnostic);
+			return FailConversion(false, error, diagnostic);
 		}
 
 		output->swap(utf8);

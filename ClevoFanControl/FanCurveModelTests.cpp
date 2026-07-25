@@ -859,6 +859,41 @@ void TestTaskXmlSerialization()
 		"task XML should reject invalid Unicode");
 	Expect(!diagnostic.empty(), "invalid Unicode should provide a diagnostic");
 	Expect(xml == "unchanged", "failed task XML serialization should not replace output");
+
+	auto expectInvalidXmlCharacter = [](const std::wstring& invalidTarget, const char* message)
+	{
+		std::string invalidOutput = "unchanged";
+		std::string invalidDiagnostic;
+		Expect(!BuildTaskXmlUtf8(invalidTarget, &invalidOutput, &invalidDiagnostic), message);
+		Expect(!invalidDiagnostic.empty(), "invalid XML character should provide a diagnostic");
+		Expect(invalidOutput == "unchanged", "invalid XML character should not replace output");
+	};
+
+	std::wstring embeddedNull = L"C:\\Fan";
+	embeddedNull.push_back(L'\0');
+	embeddedNull.append(L"Control.exe");
+	expectInvalidXmlCharacter(embeddedNull, "task XML should reject an embedded NUL");
+
+	std::wstring forbiddenControl = L"C:\\Fan";
+	forbiddenControl.push_back(static_cast<wchar_t>(0x0001));
+	forbiddenControl.append(L"Control.exe");
+	expectInvalidXmlCharacter(forbiddenControl, "task XML should reject forbidden C0 controls");
+	expectInvalidXmlCharacter(std::wstring(1, static_cast<wchar_t>(0xfffe)),
+		"task XML should reject U+FFFE");
+	expectInvalidXmlCharacter(std::wstring(1, static_cast<wchar_t>(0xffff)),
+		"task XML should reject U+FFFF");
+	expectInvalidXmlCharacter(std::wstring(1, static_cast<wchar_t>(0xdc00)),
+		"task XML should reject an isolated low surrogate");
+
+	std::wstring supplementaryTarget = L"C:\\Fan";
+	supplementaryTarget.push_back(static_cast<wchar_t>(0xd83d));
+	supplementaryTarget.push_back(static_cast<wchar_t>(0xde00));
+	supplementaryTarget.append(L"Control.exe");
+	Expect(BuildTaskXmlUtf8(supplementaryTarget, &xml, &diagnostic),
+		"task XML should accept a valid supplementary-plane character");
+	Expect(diagnostic.empty(), "supplementary-plane serialization should clear diagnostics");
+	Expect(xml.find("\xf0\x9f\x98\x80") != std::string::npos,
+		"task XML should encode a supplementary-plane character as UTF-8");
 }
 }
 
