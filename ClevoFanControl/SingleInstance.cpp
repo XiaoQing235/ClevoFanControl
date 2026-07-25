@@ -16,16 +16,16 @@ SingleInstanceGuard::~SingleInstanceGuard()
 
 SingleInstanceStatus SingleInstanceGuard::Acquire(const wchar_t* name)
 {
+	if (handle_ != nullptr)
+	{
+		errorCode_ = ERROR_INVALID_STATE;
+		return SingleInstanceStatus::Unavailable;
+	}
+
 	if (name == nullptr || name[0] == L'\0')
 	{
 		errorCode_ = ERROR_INVALID_PARAMETER;
 		return SingleInstanceStatus::Unavailable;
-	}
-
-	if (handle_ != nullptr)
-	{
-		errorCode_ = ERROR_ALREADY_EXISTS;
-		return SingleInstanceStatus::AlreadyRunning;
 	}
 
 	HANDLE handle = CreateMutexW(nullptr, FALSE, name);

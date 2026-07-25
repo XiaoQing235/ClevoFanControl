@@ -805,14 +805,24 @@ void TestSingleInstanceGuard()
 {
 	const std::wstring name = L"Global\\ClevoFanControl.Tests." +
 		std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId()));
-	SingleInstanceGuard first;
-	SingleInstanceGuard second;
-	Expect(first.Acquire(name.c_str()) == SingleInstanceStatus::Acquired,
-		"the first single-instance guard should acquire its mutex");
-	Expect(second.Acquire(name.c_str()) == SingleInstanceStatus::AlreadyRunning,
-		"a second guard should detect the existing mutex");
-	Expect(second.ErrorCode() == ERROR_ALREADY_EXISTS,
-		"duplicate acquisition should preserve ERROR_ALREADY_EXISTS");
+	{
+		SingleInstanceGuard first;
+		SingleInstanceGuard second;
+		Expect(first.Acquire(name.c_str()) == SingleInstanceStatus::Acquired,
+			"the first single-instance guard should acquire its mutex");
+		Expect(first.Acquire((name + L".again").c_str()) == SingleInstanceStatus::Unavailable,
+			"a guard should only acquire a mutex once");
+		Expect(first.ErrorCode() == ERROR_INVALID_STATE,
+			"repeated acquisition should preserve ERROR_INVALID_STATE");
+		Expect(second.Acquire(name.c_str()) == SingleInstanceStatus::AlreadyRunning,
+			"a second guard should detect the existing mutex");
+		Expect(second.ErrorCode() == ERROR_ALREADY_EXISTS,
+			"duplicate acquisition should preserve ERROR_ALREADY_EXISTS");
+	}
+
+	SingleInstanceGuard third;
+	Expect(third.Acquire(name.c_str()) == SingleInstanceStatus::Acquired,
+		"a destroyed guard should release its mutex");
 }
 }
 
