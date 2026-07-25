@@ -1,0 +1,25 @@
+# Visual Studio 忽略规则
+.vs/
+bin/
+obj/
+*.user
+*.suo
+*.cache
+
+# Visual Studio and local build outputs
+Debug/
+Release/
+MyFanControl/Debug/
+MyFanControl/Release/
+MyFanControl/TraceRelease/
+*.obj
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.tlog/
+*.recipe
+*.log
+*.exe
+*.dll
+docs/
