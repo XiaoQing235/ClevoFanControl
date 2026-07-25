@@ -681,6 +681,14 @@ void TestPresetMatching()
 	int selected = -1;
 	Expect(FindMatchingPresetIndex(collection, running, &selected), "a running matching process should select a preset");
 	Expect(selected == 0, "the first matching rule must win");
+	std::vector<std::string> automaticRunning;
+	automaticRunning.push_back("game_dx12.exe");
+	Expect(ResolveAutomaticPresetIndex(collection, automaticRunning) == 0,
+		"automatic resolution should return the first matching preset");
+	automaticRunning.clear();
+	automaticRunning.push_back("notepad.exe");
+	Expect(ResolveAutomaticPresetIndex(collection, automaticRunning) == -1,
+		"automatic resolution should select global when no process matches");
 	running.clear();
 	running.push_back("notepad.exe");
 	selected = 99;

@@ -143,6 +143,13 @@ bool FindMatchingPresetIndex(const PresetCollection& collection, const std::vect
 	return false;
 }
 
+int ResolveAutomaticPresetIndex(const PresetCollection& collection, const std::vector<std::string>& processNames)
+{
+	int index = -1;
+	FindMatchingPresetIndex(collection, processNames, &index);
+	return index;
+}
+
 bool CollectRunningProcessNames(std::vector<std::string>* processNames, std::string* diagnostic)
 {
 	if (processNames == nullptr)

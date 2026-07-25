@@ -1158,11 +1158,25 @@ void CClevoFanControlDlg::ScanPresetProcesses()
 		return;
 	}
 
-	int selectedIndex = -1;
-	if (FindMatchingPresetIndex(m_presets, processNames, &selectedIndex) &&
-		selectedIndex != m_nActivePreset)
+	const int selectedIndex = ResolveAutomaticPresetIndex(m_presets, processNames);
+	if (selectedIndex == m_nActivePreset)
+	{
+		return;
+	}
+	if (selectedIndex >= 0)
 	{
 		ApplyPresetAt(selectedIndex, FALSE, TRUE);
+		return;
+	}
+	if (!ApplyGlobalConfiguration(FALSE))
+	{
+		static ULONGLONG lastGlobalTraceTick = 0;
+		const ULONGLONG traceTick = GetTickCount64();
+		if (lastGlobalTraceTick == 0 || traceTick - lastGlobalTraceTick >= 5000)
+		{
+			TRACE0("Automatic global configuration restoration failed\n");
+			lastGlobalTraceTick = traceTick;
+		}
 	}
 }
 
