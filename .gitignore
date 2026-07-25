@@ -1,5 +1,6 @@
 # Visual Studio 忽略规则
 .vs/
+.worktrees/
 bin/
 obj/
 *.user
