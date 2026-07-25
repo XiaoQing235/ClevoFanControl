@@ -9,9 +9,9 @@ obj/
 # Visual Studio and local build outputs
 Debug/
 Release/
-MyFanControl/Debug/
-MyFanControl/Release/
-MyFanControl/TraceRelease/
+ClevoFanControl/Debug/
+ClevoFanControl/Release/
+ClevoFanControl/TraceRelease/
 *.obj
 *.pdb
 *.ilk
