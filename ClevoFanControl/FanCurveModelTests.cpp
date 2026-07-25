@@ -3,6 +3,7 @@
 #include "FanConfig.h"
 #include "PresetMatcher.h"
 #include "PresetStore.h"
+#include "SingleInstance.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -799,6 +800,20 @@ void TestPresetStoreRoundTrip()
 	Expect(overwritten.autoSwitch && overwritten.presets.size() == expected.presets.size(),
 		"overwritten preset file should contain the new collection");
 }
+
+void TestSingleInstanceGuard()
+{
+	const std::wstring name = L"Global\\ClevoFanControl.Tests." +
+		std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId()));
+	SingleInstanceGuard first;
+	SingleInstanceGuard second;
+	Expect(first.Acquire(name.c_str()) == SingleInstanceStatus::Acquired,
+		"the first single-instance guard should acquire its mutex");
+	Expect(second.Acquire(name.c_str()) == SingleInstanceStatus::AlreadyRunning,
+		"a second guard should detect the existing mutex");
+	Expect(second.ErrorCode() == ERROR_ALREADY_EXISTS,
+		"duplicate acquisition should preserve ERROR_ALREADY_EXISTS");
+}
 }
 
 int main()
@@ -821,6 +836,7 @@ int main()
 		TestPresetMatching();
 		TestPresetValidationAndControlIsolation();
 		TestPresetStoreRoundTrip();
+		TestSingleInstanceGuard();
 		std::cout << "FanCurveModelTests: PASS\n";
 		return 0;
 	}

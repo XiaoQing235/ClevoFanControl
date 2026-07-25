@@ -69,15 +69,21 @@ BOOL CClevoFanControlApp::InitInstance()
 	// TODO:  应适当修改该字符串，
 	// 例如修改为公司或组织名
 	//SetRegistryKey(_T("应用程序向导生成的本地应用程序"));
-	HWND hwndFind = FindWindow(NULL, "蓝天风扇监控");
-	if (hwndFind != NULL)
+	const SingleInstanceStatus singleInstance =
+		m_singleInstance.Acquire(L"Global\\ClevoFanControl.EcController");
+	if (singleInstance == SingleInstanceStatus::AlreadyRunning)
 	{
-		//ShowWindow(hwndFind, SW_SHOW);
-		//SetForegroundWindow(hwndFind);
-		//AfxMessageBox("风扇监控已运行");
+		AfxMessageBox(_T("ClevoFanControl is already running."), MB_ICONINFORMATION);
 		return FALSE;
 	}
-
+	if (singleInstance != SingleInstanceStatus::Acquired)
+	{
+		CString message;
+		message.Format(_T("Unable to establish single-instance protection. (Windows error %lu)"),
+			static_cast<unsigned long>(m_singleInstance.ErrorCode()));
+		AfxMessageBox(message, MB_ICONERROR);
+		return FALSE;
+	}
 	CClevoFanControlDlg dlg;
 	m_pMainWnd = &dlg;
 	dlg.Create(CClevoFanControlDlg::IDD);

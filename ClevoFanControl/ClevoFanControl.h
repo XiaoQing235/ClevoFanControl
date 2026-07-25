@@ -9,6 +9,7 @@
 #endif
 
 #include "resource.h" // Resource identifiers
+#include "SingleInstance.h"
 
 
 // CClevoFanControlApp:
@@ -28,6 +29,8 @@ public:
 
 	DECLARE_MESSAGE_MAP()
 
+private:
+	SingleInstanceGuard m_singleInstance;
 };
 
 extern CClevoFanControlApp theApp;

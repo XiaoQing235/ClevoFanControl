@@ -112,6 +112,7 @@
     <ClInclude Include="PresetMatcher.h" />
     <ClInclude Include="PresetStore.h" />
     <ClInclude Include="PresetManagerDlg.h" />
+    <ClInclude Include="SingleInstance.h" />
     <ClInclude Include="ClevoFanControl.h" />
     <ClInclude Include="ClevoFanControlDlg.h" />
     <ClInclude Include="Resource.h" />
@@ -140,6 +141,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="PresetManagerDlg.cpp" />
+    <ClCompile Include="SingleInstance.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="ClevoFanControl.cpp" />
     <ClCompile Include="ClevoFanControlDlg.cpp" />
     <ClCompile Include="stdafx.cpp">
