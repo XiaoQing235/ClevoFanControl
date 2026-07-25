@@ -1,18 +1,18 @@
 
-// ClevoFanControl.h : PROJECT_NAME Ӧ�ó������ͷ�ļ�
+// ClevoFanControl.h
 //
 
 #pragma once
 
 #ifndef __AFXWIN_H__
-	#error "�ڰ������ļ�֮ǰ������stdafx.h�������� PCH �ļ�"
+	#error "Include stdafx.h before this header so the precompiled header is available"
 #endif
 
-#include "resource.h"		// ������
+#include "resource.h" // Resource identifiers
 
 
 // CClevoFanControlApp:
-// �йش����ʵ�֣������ ClevoFanControl.cpp
+// Implementation is in ClevoFanControl.cpp
 //
 
 class CClevoFanControlApp : public CWinApp
@@ -20,11 +20,11 @@ class CClevoFanControlApp : public CWinApp
 public:
 	CClevoFanControlApp();
 
-// ��д
+// Overrides
 public:
 	virtual BOOL InitInstance();
 
-// ʵ��
+// Implementation
 
 	DECLARE_MESSAGE_MAP()
 

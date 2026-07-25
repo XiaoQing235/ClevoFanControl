@@ -22,4 +22,9 @@ ClevoFanControl/TraceRelease/
 *.log
 *.exe
 *.dll
+
+# Required root-level runtime dependencies
+!/NTPortDrvSetup.exe
+!/ClevoEcInfo.dll
+!/NVGPU_DLL.dll
 docs/
