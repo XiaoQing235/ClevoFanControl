@@ -5,6 +5,8 @@ VisualStudioVersion = 12.0.21005.1
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ClevoFanControl", "ClevoFanControl\ClevoFanControl.vcxproj", "{7F7F5488-F53E-4463-A7E5-D9F88613DA4C}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ClevoFanControlTests", "ClevoFanControl\ClevoFanControlTests.vcxproj", "{2BCACB2D-5D01-47D9-9E01-6CBB3F59270D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Win32 = Debug|Win32
@@ -15,6 +17,10 @@ Global
 		{7F7F5488-F53E-4463-A7E5-D9F88613DA4C}.Debug|Win32.Build.0 = Debug|Win32
 		{7F7F5488-F53E-4463-A7E5-D9F88613DA4C}.Release|Win32.ActiveCfg = Release|Win32
 		{7F7F5488-F53E-4463-A7E5-D9F88613DA4C}.Release|Win32.Build.0 = Release|Win32
+		{2BCACB2D-5D01-47D9-9E01-6CBB3F59270D}.Debug|Win32.ActiveCfg = Debug|Win32
+		{2BCACB2D-5D01-47D9-9E01-6CBB3F59270D}.Debug|Win32.Build.0 = Debug|Win32
+		{2BCACB2D-5D01-47D9-9E01-6CBB3F59270D}.Release|Win32.ActiveCfg = Release|Win32
+		{2BCACB2D-5D01-47D9-9E01-6CBB3F59270D}.Release|Win32.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
