@@ -63,6 +63,9 @@
     <ClInclude Include="SingleInstance.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="TaskXml.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ClevoFanControl.cpp">
@@ -102,6 +105,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="SingleInstance.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="TaskXml.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

@@ -3,6 +3,7 @@
 #include "ClevoFanControlDlg.h"
 #include "PresetMatcher.h"
 #include "PresetManagerDlg.h"
+#include "TaskXml.h"
 #include "afxdialogex.h"
 
 #include <algorithm>
@@ -2133,24 +2134,100 @@ BOOL CClevoFanControlDlg::CreateTaskXml(PCSTR strXmlPath, PCSTR strTargetPath)
 {
 	if (strXmlPath == NULL || strTargetPath == NULL)
 	{
+		SetLastError(ERROR_INVALID_PARAMETER);
 		return FALSE;
 	}
-	const char* xml =
-		"<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n"
-		"<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n"
-		"  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>\r\n"
-		"  <Principals><Principal id=\"Author\"><GroupId>S-1-5-32-545</GroupId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>\r\n"
-		"  <Settings><MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled></Settings>\r\n"
-		"  <Actions Context=\"Author\"><Exec><Command>%s</Command></Exec></Actions>\r\n"
-		"</Task>\r\n";
-	char content[4096];
-	sprintf_s(content, sizeof(content), xml, strTargetPath);
-	FILE* file = NULL;
-	if (fopen_s(&file, strXmlPath, "wt") != 0 || file == NULL)
+
+	const size_t targetLength = strlen(strTargetPath);
+	if (targetLength == 0 || targetLength > static_cast<size_t>(INT_MAX))
 	{
+		SetLastError(targetLength == 0 ? ERROR_INVALID_PARAMETER : ERROR_FILENAME_EXCED_RANGE);
 		return FALSE;
 	}
-	fputs(content, file);
-	fclose(file);
+
+	const int sourceLength = static_cast<int>(targetLength);
+	const int wideLength = MultiByteToWideChar(CP_ACP, 0, strTargetPath, sourceLength, NULL, 0);
+	if (wideLength == 0)
+	{
+		const DWORD error = GetLastError();
+		TRACE("Task target path size conversion failed with Windows error %lu.\n", error);
+		SetLastError(error);
+		return FALSE;
+	}
+
+	std::wstring wideTarget;
+	try
+	{
+		wideTarget.resize(static_cast<size_t>(wideLength));
+	}
+	catch (const std::exception&)
+	{
+		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+		return FALSE;
+	}
+	if (MultiByteToWideChar(CP_ACP, 0, strTargetPath, sourceLength, &wideTarget[0], wideLength) != wideLength)
+	{
+		const DWORD error = GetLastError();
+		TRACE("Task target path conversion failed with Windows error %lu.\n", error);
+		SetLastError(error);
+		return FALSE;
+	}
+
+	std::string xml;
+	std::string diagnostic;
+	if (!BuildTaskXmlUtf8(wideTarget, &xml, &diagnostic))
+	{
+		TRACE("Task XML serialization failed: %s\n", diagnostic.c_str());
+		SetLastError(ERROR_INVALID_DATA);
+		return FALSE;
+	}
+
+	HANDLE file = CreateFileA(
+		strXmlPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		const DWORD error = GetLastError();
+		DeleteFileA(strXmlPath);
+		TRACE("Task XML file creation failed with Windows error %lu.\n", error);
+		SetLastError(error);
+		return FALSE;
+	}
+
+	DWORD failure = ERROR_SUCCESS;
+	size_t offset = 0;
+	while (offset < xml.size())
+	{
+		const size_t remaining = xml.size() - offset;
+		const DWORD chunkSize = remaining > static_cast<size_t>(MAXDWORD) ?
+			MAXDWORD : static_cast<DWORD>(remaining);
+		DWORD bytesWritten = 0;
+		if (!WriteFile(file, xml.data() + offset, chunkSize, &bytesWritten, NULL))
+		{
+			failure = GetLastError();
+			break;
+		}
+		if (bytesWritten == 0)
+		{
+			failure = ERROR_WRITE_FAULT;
+			break;
+		}
+		offset += bytesWritten;
+	}
+	if (failure == ERROR_SUCCESS && !FlushFileBuffers(file))
+	{
+		failure = GetLastError();
+	}
+	if (!CloseHandle(file) && failure == ERROR_SUCCESS)
+	{
+		failure = GetLastError();
+	}
+
+	if (failure != ERROR_SUCCESS)
+	{
+		DeleteFileA(strXmlPath);
+		TRACE("Task XML file write failed with Windows error %lu.\n", failure);
+		SetLastError(failure);
+		return FALSE;
+	}
 	return TRUE;
 }

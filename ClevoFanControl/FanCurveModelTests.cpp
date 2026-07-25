@@ -4,6 +4,7 @@
 #include "PresetMatcher.h"
 #include "PresetStore.h"
 #include "SingleInstance.h"
+#include "TaskXml.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -824,6 +825,41 @@ void TestSingleInstanceGuard()
 	Expect(third.Acquire(name.c_str()) == SingleInstanceStatus::Acquired,
 		"a destroyed guard should release its mutex");
 }
+
+void TestTaskXmlSerialization()
+{
+	std::string xml;
+	std::string diagnostic;
+	const std::wstring target = L"C:\\R&D\\\u6e05\"Fan'Control.exe";
+	Expect(BuildTaskXmlUtf8(target, &xml, &diagnostic),
+		"task XML should serialize a Unicode target path");
+	Expect(diagnostic.empty(), "successful task XML serialization should clear diagnostics");
+	Expect(xml.find("encoding=\"UTF-8\"") != std::string::npos,
+		"task XML should declare UTF-8");
+	Expect(xml.find("UTF-16") == std::string::npos,
+		"task XML should not declare UTF-16");
+	Expect(xml.find("R&amp;D") != std::string::npos,
+		"task XML should escape ampersands");
+	Expect(xml.find("&quot;Fan&apos;Control.exe") != std::string::npos,
+		"task XML should escape quotes and apostrophes");
+	Expect(xml.find("\xe6\xb8\x85") != std::string::npos,
+		"task XML should encode non-ASCII text as UTF-8");
+
+	Expect(BuildTaskXmlUtf8(L"C:\\<Fan>.exe", &xml, &diagnostic),
+		"task XML should serialize angle brackets in a target path");
+	Expect(xml.find("&lt;Fan&gt;") != std::string::npos,
+		"task XML should escape less-than and greater-than characters");
+	Expect(!BuildTaskXmlUtf8(target, nullptr, &diagnostic),
+		"task XML should reject a null output");
+	Expect(!diagnostic.empty(), "null task XML output should provide a diagnostic");
+
+	xml = "unchanged";
+	const std::wstring invalidUnicode(1, static_cast<wchar_t>(0xd800));
+	Expect(!BuildTaskXmlUtf8(invalidUnicode, &xml, &diagnostic),
+		"task XML should reject invalid Unicode");
+	Expect(!diagnostic.empty(), "invalid Unicode should provide a diagnostic");
+	Expect(xml == "unchanged", "failed task XML serialization should not replace output");
+}
 }
 
 int main()
@@ -847,6 +883,7 @@ int main()
 		TestPresetValidationAndControlIsolation();
 		TestPresetStoreRoundTrip();
 		TestSingleInstanceGuard();
+		TestTaskXmlSerialization();
 		std::cout << "FanCurveModelTests: PASS\n";
 		return 0;
 	}

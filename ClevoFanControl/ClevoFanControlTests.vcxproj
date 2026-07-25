@@ -90,6 +90,7 @@
     <ClCompile Include="PresetMatcher.cpp" />
     <ClCompile Include="PresetStore.cpp" />
     <ClCompile Include="SingleInstance.cpp" />
+    <ClCompile Include="TaskXml.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
