@@ -142,6 +142,7 @@ CCore::CCore()
 	m_nExit = 0;
 	m_hInstDLL = NULL;
 	m_nTimerID = 0;
+	m_nTimerIntervalSeconds = 0;
 	m_hSoftControlThread = NULL;
 	m_pParentDlg = NULL;
 	m_nConfigGeneration = 0;
@@ -173,11 +174,7 @@ CCore::CCore()
 CCore::~CCore()
 {
 	RequestExit(1);
-	if (m_nTimerID != 0)
-	{
-		timeKillEvent(m_nTimerID);
-		m_nTimerID = 0;
-	}
+	StopUpdateTimer();
 
 	if (m_hSoftControlThread != NULL)
 	{
@@ -448,6 +445,44 @@ void CALLBACK CCore::TimerCallback(UINT, UINT, DWORD_PTR dwUser, DWORD_PTR, DWOR
 	}
 }
 
+BOOL CCore::StartUpdateTimer(const TIMECAPS& caps, int intervalSeconds)
+{
+	StopUpdateTimer();
+
+	const int validatedIntervalSeconds = intervalSeconds > 0 ? intervalSeconds : 1;
+	ULONGLONG intervalMilliseconds =
+		static_cast<ULONGLONG>(validatedIntervalSeconds) * 1000ULL;
+	intervalMilliseconds = std::max(intervalMilliseconds,
+		static_cast<ULONGLONG>(caps.wPeriodMin));
+	intervalMilliseconds = std::min(intervalMilliseconds,
+		static_cast<ULONGLONG>(caps.wPeriodMax));
+
+	const UINT timerID = timeSetEvent(
+		static_cast<UINT>(intervalMilliseconds),
+		caps.wPeriodMin,
+		TimerCallback,
+		reinterpret_cast<DWORD_PTR>(this),
+		TIME_PERIODIC | TIME_CALLBACK_FUNCTION | TIME_KILL_SYNCHRONOUS);
+	if (timerID == 0)
+	{
+		return FALSE;
+	}
+
+	m_nTimerID = timerID;
+	m_nTimerIntervalSeconds = validatedIntervalSeconds;
+	return TRUE;
+}
+
+void CCore::StopUpdateTimer()
+{
+	if (m_nTimerID != 0)
+	{
+		timeKillEvent(m_nTimerID);
+	}
+	m_nTimerID = 0;
+	m_nTimerIntervalSeconds = 0;
+}
+
 DWORD WINAPI CCore::SoftControlThreadProc(LPVOID lpParam)
 {
 	CCore* pCore = reinterpret_cast<CCore*>(lpParam);
@@ -510,43 +545,55 @@ void CCore::Run()
 			{
 				config.LoadDefault();
 			}
-			UINT interval = static_cast<UINT>(config.UpdateInterval * 1000);
-			interval = std::max(interval, static_cast<UINT>(caps.wPeriodMin));
-			interval = std::min(interval, static_cast<UINT>(caps.wPeriodMax));
-
-			m_nTimerID = timeSetEvent(
-				interval,
-				caps.wPeriodMin,
-				TimerCallback,
-				reinterpret_cast<DWORD_PTR>(this),
-				TIME_PERIODIC | TIME_CALLBACK_FUNCTION);
-
-			if (m_nTimerID != 0)
+			if (StartUpdateTimer(caps, config.UpdateInterval))
 			{
 				while (GetExitState() == 0)
 				{
-					if (InterlockedCompareExchange(
-						reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), 0, 0) != 0)
+					if (InterlockedExchange(
+						reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), FALSE) != 0)
 					{
 						Work();
 						InterlockedExchange(
 							reinterpret_cast<volatile LONG*>(&m_nLastUpdateTime), GetTime());
-						InterlockedExchange(
-							reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), FALSE);
+						if (GetExitState() != 0)
+						{
+							break;
+						}
+						if (!GetConfigSnapshot(&config))
+						{
+							config.LoadDefault();
+						}
+						if (ShouldRestartUpdateTimer(
+							m_nTimerIntervalSeconds, config.UpdateInterval) &&
+							!StartUpdateTimer(caps, config.UpdateInterval))
+						{
+							break;
+						}
 					}
 					Sleep(500);
 				}
-				timeKillEvent(m_nTimerID);
-				m_nTimerID = 0;
+				StopUpdateTimer();
+				if (GetExitState() == 0)
+				{
+					RunOriginal();
+				}
 			}
 			else
 			{
-				RunOriginal();
+				StopUpdateTimer();
+				if (GetExitState() == 0)
+				{
+					RunOriginal();
+				}
 			}
 		}
 		else
 		{
-			RunOriginal();
+			StopUpdateTimer();
+			if (GetExitState() == 0)
+			{
+				RunOriginal();
+			}
 		}
 
 		if (m_hSoftControlThread != NULL)
@@ -581,6 +628,8 @@ void CCore::RunOriginal()
 			if (currentTime >= nextCheckTime || InterlockedCompareExchange(
 				reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), 0, 0) != 0)
 			{
+				InterlockedExchange(
+					reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), FALSE);
 				Work();
 				InterlockedExchange(
 					reinterpret_cast<volatile LONG*>(&m_nLastUpdateTime), currentTime);
@@ -595,8 +644,6 @@ void CCore::RunOriginal()
 					interval = 1;
 				}
 				nextCheckTime = GetTime(NULL, interval);
-				InterlockedExchange(
-					reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), FALSE);
 				if (!prioritySet)
 				{
 					prioritySet = TRUE;

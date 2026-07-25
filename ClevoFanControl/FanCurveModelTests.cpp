@@ -53,6 +53,14 @@ void TestCurrentConfigGeneration()
 		"a different captured configuration generation should be stale");
 }
 
+void TestUpdateTimerRestartDecision()
+{
+	Expect(!ShouldRestartUpdateTimer(2, 2),
+		"an unchanged update interval must keep the active timer");
+	Expect(ShouldRestartUpdateTimer(2, 1),
+		"a changed update interval must restart the active timer");
+}
+
 bool SamePoints(const FanCurvePoints& left, const FanCurvePoints& right)
 {
 	if (left.size() != right.size())
@@ -934,6 +942,7 @@ int main()
 	{
 		TestForcedCoolingCompletion();
 		TestCurrentConfigGeneration();
+		TestUpdateTimerRestartDecision();
 		TestDefaultCurve();
 		TestValidationBoundaries();
 		TestInvalidEvaluationAndNullArguments();

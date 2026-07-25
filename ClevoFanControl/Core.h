@@ -84,6 +84,7 @@ public:
 	int m_nSoftCurrentDuty[2];
 
 	UINT m_nTimerID;
+	int m_nTimerIntervalSeconds;
 	static void CALLBACK TimerCallback(UINT uTimerID, UINT uMsg, DWORD_PTR dwUser, DWORD_PTR dw1, DWORD_PTR dw2);
 
 	HANDLE m_hSoftControlThread;
@@ -124,4 +125,8 @@ protected:
 	void ClearEcApi();
 	void ResetCurveState();
 	BOOL GetConfigSnapshot(CConfig* output, LONG* generation);
+
+private:
+	BOOL StartUpdateTimer(const TIMECAPS& caps, int intervalSeconds);
+	void StopUpdateTimer();
 };

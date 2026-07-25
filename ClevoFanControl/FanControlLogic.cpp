@@ -10,3 +10,8 @@ bool IsCurrentConfigGeneration(long capturedGeneration, long activeGeneration)
 {
 	return capturedGeneration == activeGeneration;
 }
+
+bool ShouldRestartUpdateTimer(int activeInterval, int configuredInterval)
+{
+	return activeInterval != configuredInterval;
+}
