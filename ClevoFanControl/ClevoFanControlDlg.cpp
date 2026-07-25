@@ -969,7 +969,10 @@ void CClevoFanControlDlg::OnTimer(UINT_PTR nIDEvent)
 	{
 		return;
 	}
-	SyncForceCoolingCompletion(status);
+	if (status.ecReady)
+	{
+		SyncForceCoolingCompletion(status);
+	}
 	if (status.lastUpdateTime != m_nLastCoreUpdateTime)
 	{
 		m_nLastCoreUpdateTime = status.lastUpdateTime;
