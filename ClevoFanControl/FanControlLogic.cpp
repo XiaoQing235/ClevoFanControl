@@ -5,3 +5,8 @@ bool ShouldCompleteForcedCooling(bool enabled, int cpuTemperature,
 {
 	return enabled && cpuTemperature < threshold && gpuTemperature < threshold;
 }
+
+bool IsCurrentConfigGeneration(long capturedGeneration, long activeGeneration)
+{
+	return capturedGeneration == activeGeneration;
+}

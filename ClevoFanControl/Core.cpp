@@ -144,6 +144,7 @@ CCore::CCore()
 	m_nTimerID = 0;
 	m_hSoftControlThread = NULL;
 	m_pParentDlg = NULL;
+	m_nConfigGeneration = 0;
 
 	InitializeCriticalSectionEx(&m_csFanControl, 0, 0);
 	InitializeCriticalSectionEx(&m_csConfig, 0, 0);
@@ -313,12 +314,21 @@ BOOL CCore::LoadConfiguration(CString* warning)
 
 BOOL CCore::GetConfigSnapshot(CConfig* output)
 {
+	return GetConfigSnapshot(output, NULL);
+}
+
+BOOL CCore::GetConfigSnapshot(CConfig* output, LONG* generation)
+{
 	if (output == NULL)
 	{
 		return FALSE;
 	}
 	EnterCriticalSection(&m_csConfig);
 	*output = m_config;
+	if (generation != NULL)
+	{
+		*generation = InterlockedCompareExchange(&m_nConfigGeneration, 0, 0);
+	}
 	LeaveCriticalSection(&m_csConfig);
 	return TRUE;
 }
@@ -339,6 +349,7 @@ BOOL CCore::ApplyConfig(const CConfig& config)
 	ResetCurveState();
 	EnterCriticalSection(&m_csFanControl);
 	m_bForcedCooling = config.ForceCooling ? TRUE : FALSE;
+	InterlockedIncrement(&m_nConfigGeneration);
 	LeaveCriticalSection(&m_csFanControl);
 	LeaveCriticalSection(&m_csConfig);
 	InterlockedExchange(reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), TRUE);
@@ -608,16 +619,20 @@ void CCore::RunOriginal()
 void CCore::Work()
 {
 	CConfig config;
-	if (!GetConfigSnapshot(&config))
+	LONG configGeneration = 0;
+	if (!GetConfigSnapshot(&config, &configGeneration))
 	{
 		return;
 	}
 
 	Update();
+	BOOL configIsCurrent = FALSE;
 	BOOL forcedCoolingActive = FALSE;
 	BOOL forcedCoolingNeedsSet = FALSE;
 	EnterCriticalSection(&m_csFanControl);
-	if (m_bForcedCooling)
+	configIsCurrent = IsCurrentConfigGeneration(configGeneration,
+		InterlockedCompareExchange(&m_nConfigGeneration, 0, 0)) ? TRUE : FALSE;
+	if (configIsCurrent && m_bForcedCooling)
 	{
 		if (!ShouldCompleteForcedCooling(m_bForcedCooling != FALSE,
 			m_nCurTemp[0], m_nCurTemp[1], config.ForceTemp))
@@ -644,6 +659,10 @@ void CCore::Work()
 		}
 	}
 	LeaveCriticalSection(&m_csFanControl);
+	if (!configIsCurrent)
+	{
+		return;
+	}
 
 	if (forcedCoolingActive)
 	{

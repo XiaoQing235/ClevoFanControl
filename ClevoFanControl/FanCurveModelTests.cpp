@@ -43,6 +43,16 @@ void TestForcedCoolingCompletion()
 		"both temperatures below the threshold should complete forced cooling");
 }
 
+void TestCurrentConfigGeneration()
+{
+	Expect(IsCurrentConfigGeneration(7, 7),
+		"equal configuration generations should be current");
+	Expect(!IsCurrentConfigGeneration(7, 8),
+		"an older captured configuration generation should be stale");
+	Expect(!IsCurrentConfigGeneration(8, 7),
+		"a different captured configuration generation should be stale");
+}
+
 bool SamePoints(const FanCurvePoints& left, const FanCurvePoints& right)
 {
 	if (left.size() != right.size())
@@ -915,6 +925,7 @@ int main()
 	try
 	{
 		TestForcedCoolingCompletion();
+		TestCurrentConfigGeneration();
 		TestDefaultCurve();
 		TestValidationBoundaries();
 		TestInvalidEvaluationAndNullArguments();

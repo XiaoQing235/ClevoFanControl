@@ -63,6 +63,7 @@ public:
 	int m_nExit;
 	HINSTANCE m_hInstDLL;
 	CConfig m_config;
+	volatile LONG m_nConfigGeneration;
 	int m_nCurTemp[2];
 	int m_nLastTemp[2];
 	int m_nSetDuty[2];
@@ -122,4 +123,5 @@ public:
 protected:
 	void ClearEcApi();
 	void ResetCurveState();
+	BOOL GetConfigSnapshot(CConfig* output, LONG* generation);
 };
