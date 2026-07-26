@@ -27,25 +27,19 @@ Replace the current \`$releaseLookup = gh api ...\` block with:
             'X-GitHub-Api-Version' = '2022-11-28'
           }
 
-          $releaseExists = $false
+          $releaseStatusCode = 0
           try {
-            Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $releaseRequestHeaders | Out-Null
-            $releaseExists = $true
+            Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $releaseRequestHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatusCode | Out-Null
           }
           catch {
-            $response = $_.Exception.Response
-            if ($null -eq $response) {
-              throw
-            }
-
-            $statusCode = [int]$response.StatusCode
-            if ($statusCode -ne 404) {
-              throw "Unable to check whether GitHub Release '$env:RELEASE_TAG' exists: HTTP $statusCode $($_.Exception.Message)"
-            }
+            throw "Unable to check whether GitHub Release '$env:RELEASE_TAG' exists: $($_.Exception.Message)"
           }
 
-          if ($releaseExists) {
+          if ($releaseStatusCode -eq 200) {
             throw "GitHub Release '$env:RELEASE_TAG' already exists."
+          }
+          if ($releaseStatusCode -ne 404) {
+            throw "Unable to check whether GitHub Release '$env:RELEASE_TAG' exists: HTTP $releaseStatusCode."
           }
 ~~~
 
@@ -81,18 +75,15 @@ $releaseRequestHeaders = @{
   Authorization = "Bearer $env:GH_TOKEN"
   'X-GitHub-Api-Version' = '2022-11-28'
 }
-$releaseExists = $false
+$releaseStatusCode = 0
 try {
-  Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $releaseRequestHeaders | Out-Null
-  $releaseExists = $true
+  Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $releaseRequestHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatusCode | Out-Null
 }
 catch {
-  $response = $_.Exception.Response
-  if ($null -eq $response) { throw }
-  $statusCode = [int]$response.StatusCode
-  if ($statusCode -ne 404) { throw }
+  throw "Request failed: $($_.Exception.Message)"
 }
-if ($releaseExists) { throw "Release already exists" }
+if ($releaseStatusCode -eq 200) { throw "Release already exists" }
+if ($releaseStatusCode -ne 404) { throw "Unexpected release status: $releaseStatusCode" }
 $remoteTag = git ls-remote --exit-code --tags origin "refs/tags/$env:RELEASE_TAG" 2>&1
 if ($LASTEXITCODE -eq 0) { throw "Remote tag already exists: $remoteTag" }
 if ($LASTEXITCODE -ne 2) { throw "Unexpected git ls-remote exit code: $LASTEXITCODE" }
