@@ -70,13 +70,14 @@ jobs:
             throw "Unable to check whether GitHub Release '$releaseTag' exists: HTTP $releaseStatusCode."
           }
 
-          git ls-remote --exit-code --tags origin "refs/tags/$releaseTag" *> $null
+          $remoteTagLookup = @(git ls-remote --tags origin "refs/tags/$releaseTag" 2>&1)
           $tagLookupExitCode = $LASTEXITCODE
-          if ($tagLookupExitCode -eq 0) {
-            throw "Remote tag '$releaseTag' already exists."
+          Write-Output "Remote tag lookup exited $tagLookupExitCode with $($remoteTagLookup.Count) output line(s)."
+          if ($tagLookupExitCode -ne 0) {
+            throw "Unable to check whether remote tag '$releaseTag' exists (git exit code $tagLookupExitCode): $($remoteTagLookup -join ' ')"
           }
-          if ($tagLookupExitCode -ne 2) {
-            throw "Unable to check whether remote tag '$releaseTag' exists (git exit code $tagLookupExitCode)."
+          if ($remoteTagLookup.Count -gt 0) {
+            throw "Remote tag '$releaseTag' already exists."
           }
 
       - name: Configure MSBuild

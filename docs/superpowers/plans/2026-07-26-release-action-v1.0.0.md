@@ -106,13 +106,15 @@ catch {
 Write-Output "Release lookup returned HTTP $releaseStatusCode for '$releaseTag'."
 if ($releaseStatusCode -eq 200) { throw "Release already exists" }
 if ($releaseStatusCode -ne 404) { throw "Unexpected release status: $releaseStatusCode" }
-$remoteTag = git ls-remote --exit-code --tags origin "refs/tags/$releaseTag" 2>&1
-if ($LASTEXITCODE -eq 0) { throw "Remote tag already exists: $remoteTag" }
-if ($LASTEXITCODE -ne 2) { throw "Unexpected git ls-remote exit code: $LASTEXITCODE" }
+$remoteTagLookup = @(git ls-remote --tags origin "refs/tags/$releaseTag" 2>&1)
+$tagLookupExitCode = $LASTEXITCODE
+Write-Output "Remote tag lookup exited $tagLookupExitCode with $($remoteTagLookup.Count) output line(s)."
+if ($tagLookupExitCode -ne 0) { throw "Unable to check remote tag: $($remoteTagLookup -join ' ')" }
+if ($remoteTagLookup.Count -gt 0) { throw "Remote tag already exists: $($remoteTagLookup -join ' ')" }
 Write-Output 'VALIDATION_OK'
 ~~~
 
-Expected: \`VALIDATION_OK\`; the API returns 404 for the absent release and \`git ls-remote\` returns exit code 2 for the absent tag.
+Expected: \`VALIDATION_OK\`; the API returns 404 for the absent release and \`git ls-remote --tags\` returns exit code 0 with no output for the absent tag.
 
 - [ ] **Step 2: Confirm the workflow still has the required release inputs and outputs**
 
