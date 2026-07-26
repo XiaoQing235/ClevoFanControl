@@ -3,6 +3,7 @@
 
 ## 使用说明
 安装NTPortDrvSetup，压缩包中有。
+
 软件需要管理员权限。
 
 ## 原贴说明（部分功能已移除）
@@ -19,13 +20,16 @@
 2. 支持多配置预设。支持自动规则，检测运行程序切换预设。
 
 ## 使用注意
-1. 本项目使用AI修改、开发。GPT-5.6-Luna(max) 开发 -> GPT-5.6-Sol(xhigh) 优化、review、Debug -> 最后Humanclaw review、测试。
+1. 本项目使用了AI。 <br> GPT-5.6-Luna(max) 开发 -> GPT-5.6-Sol(xhigh) 优化、review、Debug -> Humanclaw review、测试。
 2. 如果正在编辑一个present，同时自动规则切换了present，不会保存。建议修改presents时关闭自动规则。
 
 ## 已测试环境
 Windows 11 24H2 26100.7462
+
 BIOS 1.07.27RTR6
+
 EC 1.07.07TR3
+
 Control Center Package v6.021
 
 ## 引用&感谢
