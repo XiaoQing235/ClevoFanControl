@@ -1,4 +1,5 @@
 #include "PresetMatcher.h"
+#include "UnicodeUtil.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -7,16 +8,75 @@
 #include <tlhelp32.h>
 
 #include <new>
+#include <vector>
 
 namespace
 {
-char FoldAscii(char value)
+std::vector<std::wstring> SplitUnicodeCharacters(const std::wstring& value)
 {
-	if (value >= 'A' && value <= 'Z')
+	std::vector<std::wstring> characters;
+	characters.reserve(value.size());
+	for (size_t i = 0; i < value.size(); ++i)
 	{
-		return static_cast<char>(value + ('a' - 'A'));
+		const wchar_t codeUnit = value[i];
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff && i + 1 < value.size() &&
+			value[i + 1] >= 0xdc00 && value[i + 1] <= 0xdfff)
+		{
+			characters.push_back(value.substr(i, 2));
+			++i;
+		}
+		else
+		{
+			characters.push_back(value.substr(i, 1));
+		}
 	}
-	return value;
+	return characters;
+}
+
+bool SameCharacterIgnoreCase(const std::wstring& left, const std::wstring& right)
+{
+	return CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+		right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+bool WildcardMatchCharacters(const std::vector<std::wstring>& pattern,
+	const std::vector<std::wstring>& value)
+{
+	size_t patternIndex = 0;
+	size_t valueIndex = 0;
+	size_t starIndex = static_cast<size_t>(-1);
+	size_t starValueIndex = 0;
+
+	while (valueIndex < value.size())
+	{
+		if (patternIndex < pattern.size() && pattern[patternIndex] == L"*")
+		{
+			starIndex = patternIndex++;
+			starValueIndex = valueIndex;
+		}
+		else if (patternIndex < pattern.size() &&
+			(pattern[patternIndex] == L"?" ||
+			 SameCharacterIgnoreCase(pattern[patternIndex], value[valueIndex])))
+		{
+			++patternIndex;
+			++valueIndex;
+		}
+		else if (starIndex != static_cast<size_t>(-1))
+		{
+			patternIndex = starIndex + 1;
+			valueIndex = ++starValueIndex;
+		}
+		else
+		{
+			return false;
+		}
+	}
+
+	while (patternIndex < pattern.size() && pattern[patternIndex] == L"*")
+	{
+		++patternIndex;
+	}
+	return patternIndex == pattern.size();
 }
 
 void ClearDiagnostic(std::string* diagnostic)
@@ -83,44 +143,32 @@ private:
 
 bool WildcardMatch(const std::string& pattern, const std::string& value)
 {
-	size_t patternIndex = 0;
-	size_t valueIndex = 0;
-	size_t starIndex = std::string::npos;
-	size_t starValueIndex = 0;
+	std::wstring widePattern;
+	std::wstring wideValue;
+	return Utf8ToWide(pattern, &widePattern) && Utf8ToWide(value, &wideValue) &&
+		WildcardMatch(widePattern, wideValue);
+}
 
-	while (valueIndex < value.size())
-	{
-		if (patternIndex < pattern.size() && pattern[patternIndex] == '*')
-		{
-			starIndex = patternIndex++;
-			starValueIndex = valueIndex;
-		}
-		else if (patternIndex < pattern.size() &&
-			(pattern[patternIndex] == '?' ||
-			 FoldAscii(pattern[patternIndex]) == FoldAscii(value[valueIndex])))
-		{
-			++patternIndex;
-			++valueIndex;
-		}
-		else if (starIndex != std::string::npos)
-		{
-			patternIndex = starIndex + 1;
-			valueIndex = ++starValueIndex;
-		}
-		else
-		{
-			return false;
-		}
-	}
-
-	while (patternIndex < pattern.size() && pattern[patternIndex] == '*')
-	{
-		++patternIndex;
-	}
-	return patternIndex == pattern.size();
+bool WildcardMatch(const std::wstring& pattern, const std::wstring& value)
+{
+	return WildcardMatchCharacters(
+		SplitUnicodeCharacters(pattern), SplitUnicodeCharacters(value));
 }
 
 bool FindMatchingPresetIndex(const PresetCollection& collection, const std::vector<std::string>& processNames, int* index)
+{
+	std::vector<std::wstring> wideProcessNames;
+	wideProcessNames.reserve(processNames.size());
+	for (size_t i = 0; i < processNames.size(); ++i)
+	{
+		std::wstring name;
+		if (Utf8ToWide(processNames[i], &name)) wideProcessNames.push_back(name);
+	}
+	return FindMatchingPresetIndex(collection, wideProcessNames, index);
+}
+
+bool FindMatchingPresetIndex(const PresetCollection& collection,
+	const std::vector<std::wstring>& processNames, int* index)
 {
 	if (index == nullptr)
 	{
@@ -131,9 +179,14 @@ bool FindMatchingPresetIndex(const PresetCollection& collection, const std::vect
 	for (size_t presetIndex = 0; presetIndex < collection.presets.size(); ++presetIndex)
 	{
 		const FanPreset& preset = collection.presets[presetIndex];
+		std::wstring widePattern;
+		if (!Utf8ToWide(preset.processPattern, &widePattern))
+		{
+			continue;
+		}
 		for (size_t processIndex = 0; processIndex < processNames.size(); ++processIndex)
 		{
-			if (WildcardMatch(preset.processPattern, processNames[processIndex]))
+			if (WildcardMatch(widePattern, processNames[processIndex]))
 			{
 				*index = static_cast<int>(presetIndex);
 				return true;
@@ -150,7 +203,15 @@ int ResolveAutomaticPresetIndex(const PresetCollection& collection, const std::v
 	return index;
 }
 
-bool CollectRunningProcessNames(std::vector<std::string>* processNames, std::string* diagnostic)
+int ResolveAutomaticPresetIndex(const PresetCollection& collection,
+	const std::vector<std::wstring>& processNames)
+{
+	int index = -1;
+	FindMatchingPresetIndex(collection, processNames, &index);
+	return index;
+}
+
+bool CollectRunningProcessNames(std::vector<std::wstring>* processNames, std::string* diagnostic)
 {
 	if (processNames == nullptr)
 	{
@@ -174,15 +235,14 @@ bool CollectRunningProcessNames(std::vector<std::string>* processNames, std::str
 		return false;
 	}
 
-	// The project uses MultiByte; the SDK's unsuffixed Toolhelp APIs are ANSI here.
-	PROCESSENTRY32 entry = {};
+	PROCESSENTRY32W entry = {};
 	entry.dwSize = sizeof(entry);
-	if (!Process32First(snapshot.Get(), &entry))
+	if (!Process32FirstW(snapshot.Get(), &entry))
 	{
 		const DWORD errorCode = GetLastError();
 		if (diagnostic != nullptr)
 		{
-			*diagnostic = WindowsDiagnostic("Process32First", errorCode);
+			*diagnostic = WindowsDiagnostic("Process32FirstW", errorCode);
 		}
 		return false;
 	}
@@ -201,7 +261,7 @@ bool CollectRunningProcessNames(std::vector<std::string>* processNames, std::str
 			}
 			return false;
 		}
-		if (!Process32Next(snapshot.Get(), &entry))
+		if (!Process32NextW(snapshot.Get(), &entry))
 		{
 			const DWORD errorCode = GetLastError();
 			if (errorCode == ERROR_NO_MORE_FILES)
@@ -210,7 +270,7 @@ bool CollectRunningProcessNames(std::vector<std::string>* processNames, std::str
 			}
 			if (diagnostic != nullptr)
 			{
-				*diagnostic = WindowsDiagnostic("Process32Next", errorCode);
+				*diagnostic = WindowsDiagnostic("Process32NextW", errorCode);
 			}
 			return false;
 		}

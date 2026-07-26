@@ -9,7 +9,6 @@
 typedef FanConfig CConfig;
 
 int GetTime(tm* pt = 0, int offset = 0);
-int GetTimeInterval(int a, int b, int* p = 0);
 CString GetExePath();
 
 struct ECData
@@ -39,6 +38,7 @@ struct CCoreStatusSnapshot
 	int lastUpdateTime;
 	BOOL forcedCooling;
 	LONG forceCoolingCompletionSequence;
+	BOOL cpuAvailable;
 	BOOL gpuAvailable;
 };
 
@@ -72,7 +72,9 @@ public:
 	int m_nSelectedCurvePoint[2];
 	int m_nCurDuty[2];
 	int m_nCurRPM[2];
+	int m_nFanCount;
 	BOOL m_bFanAvailable[2];
+	BOOL m_bHasTemperatureSample[2];
 	BOOL m_bUpdateRPM;
 	int m_nLastUpdateTime;
 	BOOL m_bForcedCooling;
@@ -91,6 +93,7 @@ public:
 	static DWORD WINAPI SoftControlThreadProc(LPVOID lpParam);
 	mutable CRITICAL_SECTION m_csFanControl;
 	mutable CRITICAL_SECTION m_csConfig;
+	mutable CRITICAL_SECTION m_csEcApi;
 
 	class CClevoFanControlDlg* m_pParentDlg;
 
@@ -127,6 +130,10 @@ protected:
 	BOOL GetConfigSnapshot(CConfig* output, LONG* generation);
 
 private:
+	BOOL StartSoftControlThread();
+	void JoinSoftControlThread();
+	BOOL IsSoftControlThreadRunning() const;
+	BOOL ShouldRunSoftControl() const;
 	BOOL StartUpdateTimer(const TIMECAPS& caps, int intervalSeconds);
 	void StopUpdateTimer();
 };

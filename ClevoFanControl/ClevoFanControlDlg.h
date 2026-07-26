@@ -140,17 +140,16 @@ protected:
 
 	FanCurvePoints* SelectedCurve();
 	const FanCurvePoints* SelectedCurve() const;
-	std::string ConfigurationPath() const;
-	std::string PresetConfigurationPath() const;
+	std::wstring ConfigurationPath() const;
+	std::wstring PresetConfigurationPath() const;
 	void SetEditInteger(CEdit& edit, int value);
 	BOOL ParseEditInteger(const CEdit& edit, int* value) const;
 
-	void SetTray(PCSTR string);
+	void SetTray(PCWSTR string);
 	void ShowWindowFromTray();
 	void HideWindowToTray();
 	BOOL SaveBeforeClose();
 	BOOL SetAutorunReg(BOOL bWrite = FALSE, BOOL bAutorun = FALSE);
-	BOOL SetAutorunTask(BOOL bWrite = FALSE, BOOL bAutorun = FALSE);
-	CString ExecuteCmd(CString str);
-	BOOL CreateTaskXml(PCSTR strXmlPath, PCSTR strTargetPath);
+	BOOL SetAutorunTask(BOOL bAutorun);
+	BOOL CreateTaskXml(PCWSTR strXmlPath, PCWSTR strTargetPath);
 };

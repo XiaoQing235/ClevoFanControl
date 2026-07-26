@@ -1,11 +1,13 @@
 #include "PresetStore.h"
 #include "JsonValue.h"
+#include "UnicodeUtil.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <limits>
@@ -28,6 +30,17 @@ void ClearDiagnostic(std::string* diagnostic)
 void SetDiagnostic(std::string* diagnostic, const std::string& path, const std::string& reason)
 {
 	if (diagnostic != nullptr) *diagnostic = "PresetStore [" + path + "]: " + reason;
+}
+
+std::string DiagnosticPath(const std::wstring& path)
+{
+	std::string utf8;
+	return WideToUtf8(path, &utf8) ? utf8 : std::string("<invalid Unicode path>");
+}
+
+void SetDiagnostic(std::string* diagnostic, const std::wstring& path, const std::string& reason)
+{
+	SetDiagnostic(diagnostic, DiagnosticPath(path), reason);
 }
 
 std::string WindowsError(const char* operation, DWORD errorCode)
@@ -100,6 +113,73 @@ ReadStatus ReadJsonText(const std::string& path, std::string* text, std::string*
 	if (stream.fail())
 	{
 		SetDiagnostic(diagnostic, path, "cannot close the file after reading");
+		return ReadStatus::IoError;
+	}
+	return ReadStatus::Loaded;
+}
+
+ReadStatus ReadJsonText(const std::wstring& path, std::string* text, std::string* diagnostic)
+{
+	const DWORD attributes = GetFileAttributesW(path.c_str());
+	if (attributes == INVALID_FILE_ATTRIBUTES)
+	{
+		const DWORD errorCode = GetLastError();
+		if (errorCode == ERROR_FILE_NOT_FOUND || errorCode == ERROR_PATH_NOT_FOUND)
+		{
+			SetDiagnostic(diagnostic, path, "file is missing");
+			return ReadStatus::Missing;
+		}
+		SetDiagnostic(diagnostic, path, WindowsError("cannot inspect file", errorCode));
+		return ReadStatus::IoError;
+	}
+	if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U)
+	{
+		SetDiagnostic(diagnostic, path, "path is a directory");
+		return ReadStatus::IoError;
+	}
+
+	HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		SetDiagnostic(diagnostic, path, WindowsError("cannot open file for reading", GetLastError()));
+		return ReadStatus::IoError;
+	}
+	LARGE_INTEGER size = {};
+	if (!GetFileSizeEx(file, &size))
+	{
+		const DWORD error = GetLastError();
+		CloseHandle(file);
+		SetDiagnostic(diagnostic, path, WindowsError("cannot determine file length", error));
+		return ReadStatus::IoError;
+	}
+	if (size.QuadPart < 0 || static_cast<uint64_t>(size.QuadPart) > kMaxJsonFileSize)
+	{
+		CloseHandle(file);
+		SetDiagnostic(diagnostic, path, "JSON file exceeds the 64 KiB limit");
+		return ReadStatus::Invalid;
+	}
+
+	text->assign(static_cast<size_t>(size.QuadPart), '\0');
+	size_t offset = 0;
+	while (offset < text->size())
+	{
+		DWORD bytesRead = 0;
+		const DWORD requested = static_cast<DWORD>((std::min)(
+			text->size() - offset, static_cast<size_t>(MAXDWORD)));
+		if (!ReadFile(file, &(*text)[offset], requested, &bytesRead, NULL) || bytesRead == 0)
+		{
+			const DWORD error = GetLastError();
+			CloseHandle(file);
+			SetDiagnostic(diagnostic, path, WindowsError("cannot read the complete file", error));
+			return ReadStatus::IoError;
+		}
+		offset += bytesRead;
+	}
+	if (!CloseHandle(file))
+	{
+		SetDiagnostic(diagnostic, path, WindowsError("cannot close the file after reading", GetLastError()));
 		return ReadStatus::IoError;
 	}
 	return ReadStatus::Loaded;
@@ -195,20 +275,37 @@ bool SameCurve(const FanCurvePoints& left, const FanCurvePoints& right)
 	return true;
 }
 
-bool HasControlByte(const std::string& value)
+size_t UnicodeCharacterCount(const std::wstring& value)
+{
+	size_t count = 0;
+	for (size_t i = 0; i < value.size(); ++i)
+	{
+		const wchar_t codeUnit = value[i];
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff && i + 1 < value.size() &&
+			value[i + 1] >= 0xdc00 && value[i + 1] <= 0xdfff)
+		{
+			++i;
+		}
+		++count;
+	}
+	return count;
+}
+
+bool HasControlCharacter(const std::wstring& value)
 {
 	for (size_t i = 0; i < value.size(); ++i)
 	{
-		const unsigned char byte = static_cast<unsigned char>(value[i]);
-		if (byte == 0U || byte < 0x20U || byte == 0x7fU) return true;
+		const wchar_t character = value[i];
+		if (character == 0 || character < 0x20 || character == 0x7f) return true;
 	}
 	return false;
 }
 
-bool IsOrdinaryPatternByte(unsigned char byte)
+bool IsInvalidPatternCharacter(wchar_t character)
 {
-	return byte >= 0x20U && byte <= 0x7eU && byte != '/' && byte != '\\' && byte != ':' &&
-		byte != '"' && byte != '<' && byte != '>' && byte != '|' && byte != '[' && byte != ']';
+	return character == L'/' || character == L'\\' || character == L':' ||
+		character == L'"' || character == L'<' || character == L'>' ||
+		character == L'|' || character == L'[' || character == L']';
 }
 
 bool ValidatePattern(const std::string& pattern, std::string* error, size_t index)
@@ -218,16 +315,23 @@ bool ValidatePattern(const std::string& pattern, std::string* error, size_t inde
 		if (error != nullptr) *error = "preset " + std::to_string(index) + " has an empty process pattern";
 		return false;
 	}
-	if (pattern.size() > kMaxPatternLength)
+	std::wstring widePattern;
+	if (!Utf8ToWide(pattern, &widePattern))
 	{
-		if (error != nullptr) *error = "preset " + std::to_string(index) + " process pattern exceeds 128 bytes";
+		if (error != nullptr) *error = "preset " + std::to_string(index) + " process pattern is not valid UTF-8";
 		return false;
 	}
-	for (size_t i = 0; i < pattern.size(); ++i)
+	if (UnicodeCharacterCount(widePattern) > kMaxPatternLength)
 	{
-		if (!IsOrdinaryPatternByte(static_cast<unsigned char>(pattern[i])))
+		if (error != nullptr) *error = "preset " + std::to_string(index) + " process pattern exceeds 128 characters";
+		return false;
+	}
+	for (size_t i = 0; i < widePattern.size(); ++i)
+	{
+		if (widePattern[i] < 0x20 || widePattern[i] == 0x7f ||
+			IsInvalidPatternCharacter(widePattern[i]))
 		{
-			if (error != nullptr) *error = "preset " + std::to_string(index) + " process pattern contains an invalid byte";
+			if (error != nullptr) *error = "preset " + std::to_string(index) + " process pattern contains an invalid character";
 			return false;
 		}
 	}
@@ -427,6 +531,62 @@ bool SaveTextAtomically(const std::string& path, const std::string& text, std::s
 	}
 	return true;
 }
+
+std::wstring MakeTempPath(const std::wstring& path)
+{
+	const unsigned long sequence = g_tempSequence.fetch_add(1, std::memory_order_relaxed);
+	std::wostringstream suffix;
+	suffix << path << L".tmp." << static_cast<unsigned long>(GetCurrentProcessId()) << L"."
+		<< static_cast<unsigned long long>(GetTickCount64()) << L"." << sequence;
+	return suffix.str();
+}
+
+bool SaveTextAtomically(const std::wstring& path, const std::string& text,
+	std::string* diagnostic)
+{
+	const std::wstring temporaryPath = MakeTempPath(path);
+	HANDLE file = CreateFileW(temporaryPath.c_str(), GENERIC_WRITE, 0, NULL,
+		CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		SetDiagnostic(diagnostic, path, WindowsError("cannot create temporary file", GetLastError()));
+		return false;
+	}
+
+	DWORD failure = ERROR_SUCCESS;
+	size_t offset = 0;
+	while (offset < text.size())
+	{
+		const DWORD requested = static_cast<DWORD>((std::min)(
+			text.size() - offset, static_cast<size_t>(MAXDWORD)));
+		DWORD written = 0;
+		if (!WriteFile(file, text.data() + offset, requested, &written, NULL) || written == 0)
+		{
+			failure = GetLastError();
+			if (failure == ERROR_SUCCESS) failure = ERROR_WRITE_FAULT;
+			break;
+		}
+		offset += written;
+	}
+	if (failure == ERROR_SUCCESS && !FlushFileBuffers(file)) failure = GetLastError();
+	if (!CloseHandle(file) && failure == ERROR_SUCCESS) failure = GetLastError();
+	if (failure != ERROR_SUCCESS)
+	{
+		DeleteFileW(temporaryPath.c_str());
+		SetDiagnostic(diagnostic, path, WindowsError("cannot write temporary file", failure));
+		return false;
+	}
+	if (!MoveFileExW(temporaryPath.c_str(), path.c_str(),
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+	{
+		const DWORD errorCode = GetLastError();
+		DeleteFileW(temporaryPath.c_str());
+		SetDiagnostic(diagnostic, path,
+			WindowsError("cannot atomically replace target", errorCode));
+		return false;
+	}
+	return true;
+}
 }
 
 PresetCollection::PresetCollection()
@@ -457,14 +617,20 @@ bool PresetCollection::Validate(std::string* error) const
 			if (error != nullptr) *error = "preset " + std::to_string(i) + " has an empty name";
 			return false;
 		}
-		if (preset.name.size() > kMaxNameLength)
+		std::wstring wideName;
+		if (!Utf8ToWide(preset.name, &wideName))
 		{
-			if (error != nullptr) *error = "preset " + std::to_string(i) + " name exceeds 64 bytes";
+			if (error != nullptr) *error = "preset " + std::to_string(i) + " name is not valid UTF-8";
 			return false;
 		}
-		if (HasControlByte(preset.name))
+		if (UnicodeCharacterCount(wideName) > kMaxNameLength)
 		{
-			if (error != nullptr) *error = "preset " + std::to_string(i) + " name contains a control byte";
+			if (error != nullptr) *error = "preset " + std::to_string(i) + " name exceeds 64 characters";
+			return false;
+		}
+		if (HasControlCharacter(wideName))
+		{
+			if (error != nullptr) *error = "preset " + std::to_string(i) + " name contains a control character";
 			return false;
 		}
 		if (!names.insert(preset.name).second)
@@ -510,6 +676,11 @@ const char* PresetStore::FileName()
 	return "ClevoFanControl.presets.json";
 }
 
+const wchar_t* PresetStore::WideFileName()
+{
+	return L"ClevoFanControl.presets.json";
+}
+
 PresetLoadStatus PresetStore::Load(const std::string& path, PresetCollection* output, std::string* diagnostic)
 {
 	ClearDiagnostic(diagnostic);
@@ -543,6 +714,61 @@ bool PresetStore::Save(const std::string& path, const PresetCollection& collecti
 	if (!collection.Validate(&validationError))
 	{
 		SetDiagnostic(diagnostic, path, validationError);
+		return false;
+	}
+	JsonValue root = BuildCollection(collection);
+	std::string text;
+	std::string serializationError;
+	if (!root.Serialize(&text, true, &serializationError))
+	{
+		SetDiagnostic(diagnostic, path, "cannot serialize JSON: " + serializationError);
+		return false;
+	}
+	if (text.size() > kMaxJsonFileSize)
+	{
+		SetDiagnostic(diagnostic, path, "serialized JSON exceeds the 64 KiB limit");
+		return false;
+	}
+	if (!SaveTextAtomically(path, text, diagnostic)) return false;
+	ClearDiagnostic(diagnostic);
+	return true;
+}
+
+PresetLoadStatus PresetStore::Load(const std::wstring& path, PresetCollection* output,
+	std::string* diagnostic)
+{
+	ClearDiagnostic(diagnostic);
+	if (output == nullptr)
+	{
+		SetDiagnostic(diagnostic, path, "output is null");
+		return PresetLoadStatus::Invalid;
+	}
+	output->LoadDefault();
+	std::string text;
+	const ReadStatus status = ReadJsonText(path, &text, diagnostic);
+	if (status == ReadStatus::Missing) return PresetLoadStatus::Missing;
+	if (status == ReadStatus::IoError) return PresetLoadStatus::IoError;
+	if (status == ReadStatus::Invalid) return PresetLoadStatus::Invalid;
+	std::string reason;
+	PresetCollection candidate;
+	if (!ParseCollection(text, &candidate, &reason))
+	{
+		SetDiagnostic(diagnostic, path, reason);
+		return PresetLoadStatus::Invalid;
+	}
+	*output = candidate;
+	ClearDiagnostic(diagnostic);
+	return PresetLoadStatus::Loaded;
+}
+
+bool PresetStore::Save(const std::wstring& path, const PresetCollection& collection,
+	std::string* diagnostic)
+{
+	ClearDiagnostic(diagnostic);
+	std::string validationError;
+	if (!collection.Validate(&validationError))
+	{
+		SetDiagnostic(diagnostic, path, "preset collection is invalid: " + validationError);
 		return false;
 	}
 	JsonValue root = BuildCollection(collection);

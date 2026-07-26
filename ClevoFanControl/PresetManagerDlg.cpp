@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "PresetManagerDlg.h"
+#include "UnicodeUtil.h"
 
 #include <algorithm>
 #include <string>
@@ -7,6 +8,12 @@
 namespace
 {
 const UINT kFontRedraw = TRUE;
+
+CString Utf8Text(const std::string& value)
+{
+	std::wstring wide;
+	return Utf8ToWide(value, &wide) ? CString(wide.c_str()) : CString(_T(""));
+}
 
 int SafeTextHeight(int height)
 {
@@ -271,8 +278,8 @@ void CPresetManagerDlg::RefreshList()
 	for (int i = 0; i < static_cast<int>(m_collection.presets.size()); ++i)
 	{
 		const FanPreset& preset = m_collection.presets[static_cast<size_t>(i)];
-		const int item = m_presetList.InsertItem(i, CString(preset.name.c_str()));
-		m_presetList.SetItemText(item, 1, CString(preset.processPattern.c_str()));
+		const int item = m_presetList.InsertItem(i, Utf8Text(preset.name));
+		m_presetList.SetItemText(item, 1, Utf8Text(preset.processPattern));
 	}
 	UpdateCommandState();
 }
@@ -302,8 +309,8 @@ void CPresetManagerDlg::SyncEditorFromSelection()
 	if (m_selectedIndex >= 0 && m_selectedIndex < static_cast<int>(m_collection.presets.size()))
 	{
 		const FanPreset& preset = m_collection.presets[static_cast<size_t>(m_selectedIndex)];
-		m_presetName.SetWindowText(CString(preset.name.c_str()));
-		m_presetPattern.SetWindowText(CString(preset.processPattern.c_str()));
+		m_presetName.SetWindowText(Utf8Text(preset.name));
+		m_presetPattern.SetWindowText(Utf8Text(preset.processPattern));
 	}
 	else
 	{
@@ -327,7 +334,7 @@ void CPresetManagerDlg::UpdateCommandState()
 
 CString CPresetManagerDlg::ValidationText(const std::string& error) const
 {
-	return CString(error.empty() ? "The preset collection is invalid." : error.c_str());
+	return error.empty() ? CString(_T("The preset collection is invalid.")) : Utf8Text(error);
 }
 
 BOOL CPresetManagerDlg::ValidateCandidate(const PresetCollection& candidate) const
@@ -353,8 +360,15 @@ BOOL CPresetManagerDlg::ReadSelectedRule(FanPreset* rule) const
 	CString pattern;
 	m_presetName.GetWindowText(name);
 	m_presetPattern.GetWindowText(pattern);
-	rule->name = name.GetString();
-	rule->processPattern = pattern.GetString();
+	std::string nameUtf8;
+	std::string patternUtf8;
+	if (!WideToUtf8(std::wstring(name.GetString()), &nameUtf8) ||
+		!WideToUtf8(std::wstring(pattern.GetString()), &patternUtf8))
+	{
+		return FALSE;
+	}
+	rule->name.swap(nameUtf8);
+	rule->processPattern.swap(patternUtf8);
 	return TRUE;
 }
 
@@ -476,7 +490,11 @@ void CPresetManagerDlg::OnBnClickedPresetNew()
 	{
 		CString name;
 		name.Format(_T("Preset %d"), suffix);
-		const std::string candidateName = name.GetString();
+		std::string candidateName;
+		if (!WideToUtf8(std::wstring(name.GetString()), &candidateName))
+		{
+			return;
+		}
 		bool exists = false;
 		for (size_t i = 0; i < candidate.presets.size(); ++i)
 		{

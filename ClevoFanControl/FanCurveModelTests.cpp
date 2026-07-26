@@ -4,8 +4,10 @@
 #include "FanControlLogic.h"
 #include "PresetMatcher.h"
 #include "PresetStore.h"
+#include "ProcessRunner.h"
 #include "SingleInstance.h"
 #include "TaskXml.h"
+#include "UnicodeUtil.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -13,6 +15,9 @@
 #include <windows.h>
 
 #include <exception>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -23,6 +28,43 @@
 
 namespace
 {
+int RunProcessRunnerChild(int argc, char** argv)
+{
+	if (argc >= 4 && strcmp(argv[1], "--process-runner-child") == 0)
+	{
+		const size_t byteCount = static_cast<size_t>(strtoul(argv[2], NULL, 10));
+		const int exitCode = static_cast<int>(strtol(argv[3], NULL, 10));
+		char block[4096];
+		memset(block, 'x', sizeof(block));
+		size_t written = 0;
+		while (written < byteCount)
+		{
+			const size_t amount = (std::min)(sizeof(block), byteCount - written);
+			if (fwrite(block, 1, amount, stdout) != amount)
+			{
+				return 125;
+			}
+			written += amount;
+		}
+		fflush(stdout);
+		return exitCode;
+	}
+	if (argc == 3 && strcmp(argv[1], "--process-runner-sleep") == 0)
+	{
+		Sleep(static_cast<DWORD>(strtoul(argv[2], NULL, 10)));
+		return 0;
+	}
+	return -1;
+}
+
+DWORD WINAPI ResponsiveWaitTestThread(LPVOID parameter)
+{
+	const DWORD delay = parameter == NULL
+		? 0 : *reinterpret_cast<const DWORD*>(parameter);
+	Sleep(delay);
+	return 0;
+}
+
 void Expect(bool condition, const char* message)
 {
 	if (!condition)
@@ -193,6 +235,49 @@ public:
 private:
 	std::string directory_;
 	std::vector<std::string> files_;
+};
+
+class WideTempDirectory
+{
+public:
+	WideTempDirectory()
+	{
+		wchar_t tempDirectory[MAX_PATH] = {};
+		const DWORD length = GetTempPathW(_countof(tempDirectory), tempDirectory);
+		if (length == 0U || length >= _countof(tempDirectory))
+		{
+			throw std::runtime_error("GetTempPathW failed");
+		}
+		directory_ = tempDirectory;
+		directory_ += L"ClevoFanControl-\u0416-";
+		directory_ += std::to_wstring(static_cast<unsigned long>(GetCurrentProcessId()));
+		directory_ += L"-";
+		directory_ += std::to_wstring(static_cast<unsigned long long>(GetTickCount64()));
+		if (!CreateDirectoryW(directory_.c_str(), nullptr))
+		{
+			throw std::runtime_error("cannot create Unicode temporary test directory");
+		}
+	}
+
+	~WideTempDirectory()
+	{
+		for (size_t i = 0; i < files_.size(); ++i)
+		{
+			DeleteFileW(files_[i].c_str());
+		}
+		RemoveDirectoryW(directory_.c_str());
+	}
+
+	std::wstring File(const wchar_t* name)
+	{
+		const std::wstring path = directory_ + L"\\" + name;
+		files_.push_back(path);
+		return path;
+	}
+
+private:
+	std::wstring directory_;
+	std::vector<std::wstring> files_;
 };
 
 std::string ReadText(const std::string& path)
@@ -741,6 +826,13 @@ void TestPresetValidationAndControlIsolation()
 	badNul.presets[0].processPattern = std::string("game\0.exe", 9);
 	Expect(!badNul.Validate(&error), "embedded NUL characters in process patterns must be rejected");
 
+	PresetCollection invalidUtf8 = collection;
+	invalidUtf8.presets[0].name = "\xff";
+	Expect(!invalidUtf8.Validate(&error), "invalid UTF-8 preset names must be rejected");
+	invalidUtf8 = collection;
+	invalidUtf8.presets[0].processPattern = "\xff*.exe";
+	Expect(!invalidUtf8.Validate(&error), "invalid UTF-8 process patterns must be rejected");
+
 	PresetCollection name64 = collection;
 	name64.presets[0].name = std::string(63, 'n') + "A";
 	Expect(name64.Validate(&error), "64-byte preset names should be accepted");
@@ -934,15 +1026,216 @@ void TestTaskXmlSerialization()
 	Expect(xml.find("\xf0\x9f\x98\x80") != std::string::npos,
 		"task XML should encode a supplementary-plane character as UTF-8");
 }
+
+void TestTelemetryBoundaries()
+{
+	Expect(!ShouldRetryTemperatureSample(false, 0, 80),
+		"first temperature sample should establish the baseline");
+	Expect(!ShouldRetryTemperatureSample(true, 50, 80),
+		"a 30-degree change should remain valid");
+	Expect(ShouldRetryTemperatureSample(true, 50, 81),
+		"a change above 30 degrees should be retried");
+	Expect(DecodeFanRpmCounter(0) == 0, "zero RPM counter should report a stopped fan");
+	Expect(DecodeFanRpmCounter(301) == 2100000 / 301,
+		"valid RPM counter should be decoded");
+	Expect(DecodeFanRpmCounter(300) == -1 && DecodeFanRpmCounter(5000) == -1,
+		"out-of-range RPM counters should report unavailable");
+	Expect(NormalizeFanCount(1) == 1 && NormalizeFanCount(2) == 2 &&
+		NormalizeFanCount(3) == 3, "supported fan counts should be preserved");
+	Expect(NormalizeFanCount(0) == 1 && NormalizeFanCount(4) == 1,
+		"invalid fan counts should fall back to CPU-only mode");
 }
 
-int main()
+void TestProcessRunner()
 {
+	wchar_t executablePath[32768] = {};
+	const DWORD pathLength = GetModuleFileNameW(NULL, executablePath, _countof(executablePath));
+	Expect(pathLength != 0 && pathLength < _countof(executablePath),
+		"test executable path should be available");
+
+	const ProcessRunResult largeOutput = RunProcess(executablePath,
+		L"--process-runner-child 131072 7", 5000);
+	Expect(largeOutput.launched, "large-output child should launch");
+	Expect(!largeOutput.timedOut, "large-output child should not time out");
+	Expect(largeOutput.readSucceeded, "large-output child pipe should be drained");
+	Expect(largeOutput.exitCode == 7, "child exit code should be preserved");
+	Expect(largeOutput.output.size() == 131072,
+		"all output beyond the pipe capacity should be captured");
+	Expect(!largeOutput.Succeeded(), "non-zero child exit code should report failure");
+
+	const ProcessRunResult success = RunProcess(executablePath,
+		L"--process-runner-child 16 0", 5000);
+	Expect(success.Succeeded(), "zero-exit child should report success");
+	Expect(success.output.size() == 16, "small child output should be captured");
+	const std::wstring longArguments = L"--process-runner-child 4 0 " +
+		std::wstring(2048, L'x');
+	const ProcessRunResult longCommand = RunProcess(executablePath, longArguments, 5000);
+	Expect(longCommand.Succeeded() && longCommand.output.size() == 4,
+		"command lines beyond the old 1024-byte limit should be supported");
+
+	const ProcessRunResult timeout = RunProcess(executablePath,
+		L"--process-runner-sleep 2000", 50);
+	Expect(timeout.launched, "timeout child should launch");
+	Expect(timeout.timedOut, "slow child should time out");
+	Expect(!timeout.Succeeded(), "timed-out child must not report success");
+
+	const ProcessRunResult missing = RunProcess(
+		L"Z:\\path-that-does-not-exist\\missing.exe", L"", 100);
+	Expect(!missing.launched, "missing child executable should fail to launch");
+
+	const ProcessRunResult responsiveOutput = RunProcessResponsive(executablePath,
+		L"--process-runner-child 131072 0", 5000);
+	Expect(responsiveOutput.Succeeded(),
+		"responsive process runner should preserve a successful exit status");
+	Expect(responsiveOutput.output.size() == 131072,
+		"responsive process runner should drain output while waiting");
+
+	PostQuitMessage(37);
+	const ProcessRunResult responsiveQuit = RunProcessResponsive(executablePath,
+		L"--process-runner-sleep 50", 5000);
+	Expect(responsiveQuit.Succeeded(),
+		"responsive process runner should finish after observing WM_QUIT");
+	MSG quitMessage = {};
+	Expect(PeekMessage(&quitMessage, NULL, WM_QUIT, WM_QUIT, PM_REMOVE) != FALSE &&
+		quitMessage.wParam == 37,
+		"responsive process runner should restore the pending WM_QUIT once");
+	Expect(PeekMessage(&quitMessage, NULL, WM_QUIT, WM_QUIT, PM_REMOVE) == FALSE,
+		"responsive process runner should not duplicate WM_QUIT");
+
+	const UINT deferredMessageId = WM_USER + 31;
+	Expect(PostThreadMessage(GetCurrentThreadId(), deferredMessageId, 9, 11) != FALSE,
+		"test should queue a custom UI message");
+	const ProcessRunResult responsiveDeferred = RunProcessResponsive(executablePath,
+		L"--process-runner-sleep 50", 5000);
+	Expect(responsiveDeferred.Succeeded(),
+		"responsive process runner should finish with a queued custom message");
+	MSG deferredMessage = {};
+	Expect(PeekMessage(&deferredMessage, NULL, deferredMessageId,
+		deferredMessageId, PM_REMOVE) != FALSE &&
+		deferredMessage.wParam == 9 && deferredMessage.lParam == 11,
+		"responsive waits should defer non-paint messages instead of dispatching them");
+
+	DWORD waitDelay = 100;
+	HANDLE waitThread = CreateThread(NULL, 0, ResponsiveWaitTestThread,
+		&waitDelay, 0, NULL);
+	Expect(waitThread != NULL, "responsive wait test thread should start");
+	const ResponsiveWaitResult responsiveTimeout =
+		WaitForThreadResponsive(waitThread, 1);
+	Expect(!responsiveTimeout.completed && responsiveTimeout.timedOut &&
+		responsiveTimeout.errorCode == ERROR_TIMEOUT,
+		"responsive thread waits should return a bounded timeout");
+	Expect(WaitForSingleObject(waitThread, 1000) == WAIT_OBJECT_0,
+		"responsive wait test thread should finish after the bounded timeout");
+	CloseHandle(waitThread);
+}
+
+void TestUnicodeBoundaries()
+{
+	const std::string presetName = "\xe9\x9d\x99\xe9\x9f\xb3";
+	const std::string processPattern = "\xe6\xb8\xb8\xe6\x88\x8f*.exe";
+	std::wstring wideName;
+	Expect(Utf8ToWide(presetName, &wideName), "UTF-8 preset name should decode");
+	std::string roundTripName;
+	Expect(WideToUtf8(wideName, &roundTripName) && roundTripName == presetName,
+		"preset name should round-trip through UTF-16");
+
+	PresetCollection collection;
+	collection.autoSwitch = true;
+	FanPreset preset = MakePreset("placeholder", "placeholder.exe", 0);
+	preset.name = presetName;
+	preset.processPattern = processPattern;
+	collection.presets.push_back(preset);
+	std::string error;
+	Expect(collection.Validate(&error), "Unicode preset collection should validate");
+
+	std::vector<std::wstring> runningProcesses;
+	runningProcesses.push_back(L"\u6e38\u620f_dx12.exe");
+	Expect(ResolveAutomaticPresetIndex(collection, runningProcesses) == 0,
+		"UTF-8 pattern should match a Unicode process name");
+
+	std::wstring emoji;
+	emoji.push_back(static_cast<wchar_t>(0xd83d));
+	emoji.push_back(static_cast<wchar_t>(0xde00));
+	Expect(WildcardMatch(std::wstring(L"?.exe"), emoji + L".exe"),
+		"question wildcard should consume one supplementary Unicode character");
+	Expect(WildcardMatch(std::wstring(L"\u00c4PP.EXE"), std::wstring(L"\u00e4pp.exe")),
+		"Unicode process matching should ignore case");
+
+	PresetCollection name64 = collection;
+	name64.presets[0].name.clear();
+	for (int i = 0; i < 64; ++i) name64.presets[0].name += "\xe9\x9d\x99";
+	Expect(name64.Validate(&error), "64 Unicode characters should be accepted in a preset name");
+	name64.presets[0].name += "\xe9\x9d\x99";
+	Expect(!name64.Validate(&error), "65 Unicode characters should be rejected in a preset name");
+
+	WideTempDirectory directory;
+	FanConfig config;
+	config.LoadDefault();
+	const std::wstring configPath = directory.File(L"\u914d\u7f6e.json");
+	std::string diagnostic;
+	Expect(ConfigStore::Save(configPath, config, &diagnostic),
+		"config should save through a Unicode path");
+	FanConfig loadedConfig;
+	Expect(ConfigStore::Load(configPath, &loadedConfig, &diagnostic) == ConfigLoadStatus::Loaded,
+		"config should load through a Unicode path");
+	Expect(SameConfig(config, loadedConfig), "Unicode-path config should round-trip");
+
+	const std::wstring presetPath = directory.File(L"\u9884\u8bbe.json");
+	Expect(PresetStore::Save(presetPath, collection, &diagnostic),
+		"presets should save through a Unicode path");
+	PresetCollection loadedPresets;
+	Expect(PresetStore::Load(presetPath, &loadedPresets, &diagnostic) == PresetLoadStatus::Loaded,
+		"presets should load through a Unicode path");
+	Expect(loadedPresets.presets.size() == 1 &&
+		loadedPresets.presets[0].name == presetName &&
+		loadedPresets.presets[0].processPattern == processPattern,
+		"Unicode preset text should round-trip as UTF-8");
+
+	wchar_t executablePath[32768] = {};
+	const DWORD pathLength = GetModuleFileNameW(NULL, executablePath, _countof(executablePath));
+	Expect(pathLength != 0 && pathLength < _countof(executablePath),
+		"test executable path should be available for Unicode launch test");
+	const std::wstring unicodeExecutable = directory.File(L"\u0416-test.exe");
+	Expect(CopyFileW(executablePath, unicodeExecutable.c_str(), FALSE) != FALSE,
+		"test executable should copy to a Unicode path");
+	const ProcessRunResult unicodeProcess = RunProcess(unicodeExecutable,
+		L"--process-runner-child 8 0", 5000);
+	Expect(unicodeProcess.Succeeded() && unicodeProcess.output.size() == 8,
+		"process runner should launch from a Unicode path");
+
+	std::vector<std::wstring> processNames;
+	Expect(CollectRunningProcessNames(&processNames, &diagnostic),
+		"wide process enumeration should succeed");
+	const wchar_t* executableName = wcsrchr(executablePath, L'\\');
+	executableName = executableName == nullptr ? executablePath : executableName + 1;
+	bool foundCurrentProcess = false;
+	for (size_t i = 0; i < processNames.size(); ++i)
+	{
+		if (CompareStringOrdinal(processNames[i].c_str(), -1,
+			executableName, -1, TRUE) == CSTR_EQUAL)
+		{
+			foundCurrentProcess = true;
+			break;
+		}
+	}
+	Expect(foundCurrentProcess, "wide process enumeration should include the test process");
+}
+}
+
+int main(int argc, char** argv)
+{
+	const int childExitCode = RunProcessRunnerChild(argc, argv);
+	if (childExitCode >= 0)
+	{
+		return childExitCode;
+	}
+
 	try
 	{
 		TestForcedCoolingCompletion();
 		TestCurrentConfigGeneration();
 		TestUpdateTimerRestartDecision();
+		TestTelemetryBoundaries();
 		TestDefaultCurve();
 		TestValidationBoundaries();
 		TestInvalidEvaluationAndNullArguments();
@@ -961,6 +1254,8 @@ int main()
 		TestPresetStoreRoundTrip();
 		TestSingleInstanceGuard();
 		TestTaskXmlSerialization();
+		TestProcessRunner();
+		TestUnicodeBoundaries();
 		std::cout << "FanCurveModelTests: PASS\n";
 		return 0;
 	}

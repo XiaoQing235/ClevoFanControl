@@ -1,6 +1,7 @@
 #include "stdafx.h"
 #include "Core.h"
 #include "FanControlLogic.h"
+#include "UnicodeUtil.h"
 
 #ifdef max
 #undef max
@@ -17,16 +18,15 @@ namespace
 {
 CString DiagnosticToCString(const std::string& diagnostic)
 {
-	CStringA narrow(diagnostic.c_str());
-	return CString(narrow);
+	std::wstring wide;
+	return Utf8ToWide(diagnostic, &wide) ? CString(wide.c_str()) : CString(_T("Invalid UTF-8 diagnostic"));
 }
 
-std::string ConfigurationPath()
+std::wstring ConfigurationPath()
 {
-	CStringA narrow = CStringA(GetExePath());
-	narrow += "\\";
-	narrow += ConfigStore::FileName();
-	return std::string(narrow.GetString());
+	CString path = GetExePath();
+	path += ConfigStore::WideFileName();
+	return std::wstring(path.GetString());
 }
 
 int CurveLevelAtTemperature(const FanCurvePoints& curve, int temperature)
@@ -63,28 +63,6 @@ int GetTime(tm* pt, int offset)
 	tt += offset;
 	localtime_s(pt, &tt);
 	return pt->tm_hour * 10000 + pt->tm_min * 100 + pt->tm_sec;
-}
-
-int GetTimeInterval(int a, int b, int* p)
-{
-	int a1 = a / 10000;
-	int a2 = (a % 10000) / 100;
-	int a3 = a % 100;
-
-	int b1 = b / 10000;
-	int b2 = (b % 10000) / 100;
-	int b3 = b % 100;
-
-	int seconds = (a1 - b1) * 3600 + (a2 - b2) * 60 + a3 - b3;
-	if (p)
-	{
-		*p = seconds;
-	}
-	const int sign = seconds >= 0 ? 1 : -1;
-	seconds = abs(seconds);
-	const int encoded = (seconds / 3600) * 10000 +
-		(seconds % 3600) / 60 * 100 + seconds % 60;
-	return encoded * sign;
 }
 
 CString GetExePath()
@@ -146,9 +124,11 @@ CCore::CCore()
 	m_hSoftControlThread = NULL;
 	m_pParentDlg = NULL;
 	m_nConfigGeneration = 0;
+	m_nFanCount = 0;
 
 	InitializeCriticalSectionEx(&m_csFanControl, 0, 0);
 	InitializeCriticalSectionEx(&m_csConfig, 0, 0);
+	InitializeCriticalSectionEx(&m_csEcApi, 0, 0);
 
 	for (int i = 0; i < 2; ++i)
 	{
@@ -157,8 +137,9 @@ CCore::CCore()
 		m_nSetDuty[i] = 0;
 		m_nSetDutyLevel[i] = 0;
 		m_nCurDuty[i] = 0;
-		m_nCurRPM[i] = 0;
+		m_nCurRPM[i] = -1;
 		m_bFanAvailable[i] = FALSE;
+		m_bHasTemperatureSample[i] = FALSE;
 		m_nSoftTargetDuty[i] = 0;
 		m_nSoftCurrentDuty[i] = 0;
 	}
@@ -176,17 +157,13 @@ CCore::~CCore()
 	RequestExit(1);
 	StopUpdateTimer();
 
-	if (m_hSoftControlThread != NULL)
-	{
-		WaitForSingleObject(m_hSoftControlThread, INFINITE);
-		CloseHandle(m_hSoftControlThread);
-		m_hSoftControlThread = NULL;
-	}
+	JoinSoftControlThread();
 
 	SetParentDialog(NULL);
 	Uninit();
 	DeleteCriticalSection(&m_csFanControl);
 	DeleteCriticalSection(&m_csConfig);
+	DeleteCriticalSection(&m_csEcApi);
 }
 
 void CCore::SetParentDialog(CClevoFanControlDlg* pDlg)
@@ -208,11 +185,11 @@ BOOL CCore::Init()
 	ClearEcApi();
 
 	m_nInit = -1;
-	CString dllPath = GetExePath() + _T("\\ClevoEcInfo.dll");
+	CString dllPath = GetExePath() + _T("ClevoEcInfo.dll");
 	m_hInstDLL = LoadLibrary(dllPath);
 	if (m_hInstDLL == NULL)
 	{
-		TRACE("Cannot load ClevoEcInfo.dll: %s\n", dllPath.GetString());
+		TRACE(_T("Cannot load ClevoEcInfo.dll: %s\n"), dllPath.GetString());
 		m_nInit = 2;
 		return FALSE;
 	}
@@ -243,7 +220,11 @@ BOOL CCore::Init()
 		return FALSE;
 	}
 
-	if (m_pfnInitIo() != 1)
+	EnterCriticalSection(&m_csEcApi);
+	const BOOL initialized = m_pfnInitIo() == 1;
+	const int reportedFanCount = initialized ? m_pfnGetFANCounter() : 0;
+	LeaveCriticalSection(&m_csEcApi);
+	if (!initialized)
 	{
 		TRACE0("ClevoEcInfo.dll initialization failed\n");
 		FreeLibrary(m_hInstDLL);
@@ -252,9 +233,24 @@ BOOL CCore::Init()
 		m_nInit = 2;
 		return FALSE;
 	}
+	const int fanCount = NormalizeFanCount(reportedFanCount);
+	if (fanCount != reportedFanCount)
+	{
+		TRACE("ClevoEcInfo.dll reported invalid fan count %d; using CPU-only mode\n",
+			reportedFanCount);
+	}
+	EnterCriticalSection(&m_csFanControl);
+	m_nFanCount = fanCount;
+	for (int i = 0; i < 2; ++i)
+	{
+		m_bFanAvailable[i] = FALSE;
+		m_bHasTemperatureSample[i] = FALSE;
+		m_nCurRPM[i] = -1;
+	}
+	LeaveCriticalSection(&m_csFanControl);
 
 	m_nInit = 1;
-	TRACE0("ClevoEcInfo.dll initialized\n");
+	TRACE("ClevoEcInfo.dll initialized with %d fan(s)\n", fanCount);
 	return TRUE;
 }
 
@@ -270,6 +266,11 @@ void CCore::Uninit()
 	EnterCriticalSection(&m_csFanControl);
 	m_bFanAvailable[0] = FALSE;
 	m_bFanAvailable[1] = FALSE;
+	m_nFanCount = 0;
+	m_bHasTemperatureSample[0] = FALSE;
+	m_bHasTemperatureSample[1] = FALSE;
+	m_nCurRPM[0] = -1;
+	m_nCurRPM[1] = -1;
 	LeaveCriticalSection(&m_csFanControl);
 	m_nInit = 0;
 }
@@ -281,7 +282,7 @@ BOOL CCore::LoadConfiguration(CString* warning)
 		warning->Empty();
 	}
 
-	const std::string path = ConfigurationPath();
+	const std::wstring path = ConfigurationPath();
 	CConfig loaded;
 	std::string diagnostic;
 	const ConfigLoadStatus status = ConfigStore::Load(path, &loaded, &diagnostic);
@@ -337,7 +338,7 @@ BOOL CCore::ApplyConfig(const CConfig& config)
 
 	if (!valid)
 	{
-		TRACE("Rejected configuration: %s\n", validationError.c_str());
+		TRACE("Rejected configuration: %hs\n", validationError.c_str());
 		return FALSE;
 	}
 
@@ -381,6 +382,7 @@ BOOL CCore::GetStatusSnapshot(CCoreStatusSnapshot* output) const
 	output->forcedCooling = m_bForcedCooling;
 	output->forceCoolingCompletionSequence = InterlockedCompareExchange(
 		const_cast<volatile LONG*>(&m_nForceCoolingCompletionSequence), 0, 0);
+	output->cpuAvailable = m_bFanAvailable[0] && output->ecReady;
 	output->gpuAvailable = m_bFanAvailable[1] && output->ecReady;
 	LeaveCriticalSection(&m_csFanControl);
 	return TRUE;
@@ -457,9 +459,11 @@ BOOL CCore::StartUpdateTimer(const TIMECAPS& caps, int intervalSeconds)
 	intervalMilliseconds = std::min(intervalMilliseconds,
 		static_cast<ULONGLONG>(caps.wPeriodMax));
 
+	const UINT timerResolution = (std::max)(caps.wPeriodMin,
+		(std::min)(static_cast<UINT>(intervalMilliseconds), 100U));
 	const UINT timerID = timeSetEvent(
 		static_cast<UINT>(intervalMilliseconds),
-		caps.wPeriodMin,
+		timerResolution,
 		TimerCallback,
 		reinterpret_cast<DWORD_PTR>(this),
 		TIME_PERIODIC | TIME_CALLBACK_FUNCTION | TIME_KILL_SYNCHRONOUS);
@@ -493,12 +497,7 @@ DWORD WINAPI CCore::SoftControlThreadProc(LPVOID lpParam)
 
 	while (pCore->GetExitState() == 0)
 	{
-		CConfig config;
-		if (!pCore->GetConfigSnapshot(&config))
-		{
-			break;
-		}
-		if (config.SoftControl && config.TakeOver && !pCore->GetForcedCooling())
+		if (pCore->ShouldRunSoftControl())
 		{
 			pCore->SoftControlDuty();
 		}
@@ -507,9 +506,58 @@ DWORD WINAPI CCore::SoftControlThreadProc(LPVOID lpParam)
 	return 0;
 }
 
+BOOL CCore::StartSoftControlThread()
+{
+	if (IsSoftControlThreadRunning())
+	{
+		return TRUE;
+	}
+	if (m_hSoftControlThread != NULL)
+	{
+		CloseHandle(m_hSoftControlThread);
+		m_hSoftControlThread = NULL;
+	}
+
+	m_hSoftControlThread = CreateThread(NULL, 0, SoftControlThreadProc, this, 0, NULL);
+	if (m_hSoftControlThread == NULL)
+	{
+		TRACE("Unable to start soft-control thread: Win32 error %lu\n",
+			static_cast<unsigned long>(GetLastError()));
+		return FALSE;
+	}
+	SetThreadPriority(m_hSoftControlThread, THREAD_PRIORITY_ABOVE_NORMAL);
+	return TRUE;
+}
+
+void CCore::JoinSoftControlThread()
+{
+	if (m_hSoftControlThread != NULL)
+	{
+		WaitForSingleObject(m_hSoftControlThread, INFINITE);
+		CloseHandle(m_hSoftControlThread);
+		m_hSoftControlThread = NULL;
+	}
+}
+
+BOOL CCore::IsSoftControlThreadRunning() const
+{
+	return m_hSoftControlThread != NULL &&
+		WaitForSingleObject(m_hSoftControlThread, 0) == WAIT_TIMEOUT;
+}
+
+BOOL CCore::ShouldRunSoftControl() const
+{
+	EnterCriticalSection(&m_csConfig);
+	const BOOL enabled = m_config.SoftControl && m_config.TakeOver;
+	EnterCriticalSection(&m_csFanControl);
+	const BOOL forcedCooling = m_bForcedCooling;
+	LeaveCriticalSection(&m_csFanControl);
+	LeaveCriticalSection(&m_csConfig);
+	return enabled && !forcedCooling;
+}
+
 void CCore::Run()
 {
-	RequestExit(0);
 	CString warning;
 	if (!LoadConfiguration(&warning))
 	{
@@ -517,7 +565,7 @@ void CCore::Run()
 	}
 	if (!warning.IsEmpty())
 	{
-		TRACE("Configuration warning: %s\n", warning.GetString());
+		TRACE(_T("Configuration warning: %s\n"), warning.GetString());
 	}
 
 	if (!m_nInit)
@@ -528,14 +576,7 @@ void CCore::Run()
 
 	if (m_nInit == 1)
 	{
-		if (m_hSoftControlThread == NULL)
-		{
-			m_hSoftControlThread = CreateThread(NULL, 0, SoftControlThreadProc, this, 0, NULL);
-			if (m_hSoftControlThread != NULL)
-			{
-				SetThreadPriority(m_hSoftControlThread, THREAD_PRIORITY_ABOVE_NORMAL);
-			}
-		}
+		StartSoftControlThread();
 
 		TIMECAPS caps;
 		if (timeGetDevCaps(&caps, sizeof(caps)) == TIMERR_NOERROR)
@@ -596,43 +637,30 @@ void CCore::Run()
 			}
 		}
 
-		if (m_hSoftControlThread != NULL)
-		{
-			WaitForSingleObject(m_hSoftControlThread, INFINITE);
-			CloseHandle(m_hSoftControlThread);
-			m_hSoftControlThread = NULL;
-		}
+		JoinSoftControlThread();
 	}
 	RequestExit(2);
 }
 
 void CCore::RunOriginal()
 {
-	int nextCheckTime = 0;
-	BOOL prioritySet = FALSE;
+	ULONGLONG nextCheckTick = 0;
 
 	if (m_nInit == 1)
 	{
-		if (m_hSoftControlThread == NULL)
-		{
-			m_hSoftControlThread = CreateThread(NULL, 0, SoftControlThreadProc, this, 0, NULL);
-			if (m_hSoftControlThread != NULL)
-			{
-				SetThreadPriority(m_hSoftControlThread, THREAD_PRIORITY_ABOVE_NORMAL);
-			}
-		}
+		StartSoftControlThread();
 
 		while (GetExitState() == 0)
 		{
-			const int currentTime = GetTime();
-			if (currentTime >= nextCheckTime || InterlockedCompareExchange(
+			const ULONGLONG currentTick = GetTickCount64();
+			if (currentTick >= nextCheckTick || InterlockedCompareExchange(
 				reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), 0, 0) != 0)
 			{
 				InterlockedExchange(
 					reinterpret_cast<volatile LONG*>(&m_bForcedRefresh), FALSE);
 				Work();
 				InterlockedExchange(
-					reinterpret_cast<volatile LONG*>(&m_nLastUpdateTime), currentTime);
+					reinterpret_cast<volatile LONG*>(&m_nLastUpdateTime), GetTime());
 				CConfig config;
 				if (!GetConfigSnapshot(&config))
 				{
@@ -643,22 +671,13 @@ void CCore::RunOriginal()
 				{
 					interval = 1;
 				}
-				nextCheckTime = GetTime(NULL, interval);
-				if (!prioritySet)
-				{
-					prioritySet = TRUE;
-					SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
-				}
+				nextCheckTick = GetTickCount64() +
+					static_cast<ULONGLONG>(interval) * 1000ULL;
 			}
 			Sleep(100);
 		}
 
-		if (m_hSoftControlThread != NULL)
-		{
-			WaitForSingleObject(m_hSoftControlThread, INFINITE);
-			CloseHandle(m_hSoftControlThread);
-			m_hSoftControlThread = NULL;
-		}
+		JoinSoftControlThread();
 	}
 	RequestExit(2);
 }
@@ -681,16 +700,25 @@ void CCore::Work()
 		InterlockedCompareExchange(&m_nConfigGeneration, 0, 0)) ? TRUE : FALSE;
 	if (configIsCurrent && m_bForcedCooling)
 	{
-		if (!ShouldCompleteForcedCooling(m_bForcedCooling != FALSE,
-			m_nCurTemp[0], m_nCurTemp[1], config.ForceTemp))
+		const BOOL cpuTemperatureAvailable = m_bFanAvailable[0];
+		const int gpuTemperature = m_nFanCount >= 2
+			? m_nCurTemp[1]
+			: m_nCurTemp[0];
+		if (!cpuTemperatureAvailable ||
+			!ShouldCompleteForcedCooling(m_bForcedCooling != FALSE,
+				m_nCurTemp[0], gpuTemperature, config.ForceTemp))
 		{
 			forcedCoolingActive = TRUE;
-			if (m_nSetDuty[0] < 100 || m_nSetDuty[1] < 100)
+			if (m_nSetDuty[0] < 100 ||
+				(m_nFanCount >= 2 && m_nSetDuty[1] < 100))
 			{
 				m_nSetDuty[0] = 100;
-				m_nSetDuty[1] = 100;
 				m_nSetDutyLevel[0] = CurveLastLevel(config.CpuCurve);
-				m_nSetDutyLevel[1] = CurveLastLevel(config.GpuCurve);
+				if (m_nFanCount >= 2)
+				{
+					m_nSetDuty[1] = 100;
+					m_nSetDutyLevel[1] = CurveLastLevel(config.GpuCurve);
+				}
 				for (int i = 0; i < 2; ++i)
 				{
 					m_nSoftTargetDuty[i] = m_nSetDuty[i];
@@ -741,16 +769,36 @@ void CCore::Update()
 		return;
 	}
 
+	EnterCriticalSection(&m_csFanControl);
+	const int fanCount = m_nFanCount;
+	const int availableLogicalFans = (std::max)(0, (std::min)(fanCount, 2));
+	for (int i = availableLogicalFans; i < 2; ++i)
+	{
+		m_bFanAvailable[i] = FALSE;
+		m_bHasTemperatureSample[i] = FALSE;
+		m_nCurRPM[i] = -1;
+	}
+	LeaveCriticalSection(&m_csFanControl);
+	if (fanCount < 1)
+	{
+		return;
+	}
+
 	ECData data;
 	int temperatureErrors = 0;
-	for (int i = 0; i < 2; ++i)
+	const int telemetryChannelCount = (std::min)(fanCount, 2);
+	for (int i = 0; i < telemetryChannelCount; ++i)
 	{
+		EnterCriticalSection(&m_csEcApi);
 		data = m_pfnGetTempFanDuty(i + 1);
+		LeaveCriticalSection(&m_csEcApi);
 		EnterCriticalSection(&m_csFanControl);
 		const int currentTemperature = m_nCurTemp[i];
+		const BOOL hasTemperatureSample = m_bHasTemperatureSample[i];
 		const BOOL updateRPM = m_bUpdateRPM;
 		LeaveCriticalSection(&m_csFanControl);
-		if (abs(static_cast<int>(data.Remote) - currentTemperature) > 30)
+		if (ShouldRetryTemperatureSample(hasTemperatureSample != FALSE,
+			currentTemperature, static_cast<int>(data.Remote)))
 		{
 			if (temperatureErrors++ == 0)
 			{
@@ -763,19 +811,15 @@ void CCore::Update()
 		EnterCriticalSection(&m_csFanControl);
 		m_nLastTemp[i] = m_nCurTemp[i];
 		m_nCurTemp[i] = data.Remote;
+		m_bHasTemperatureSample[i] = TRUE;
 		m_bFanAvailable[i] = TRUE;
 		m_nCurDuty[i] = static_cast<int>(data.FanDuty * 100 / 255.0 + 0.5);
 		if (updateRPM && m_pfnGetFANRPM[i] != NULL)
 		{
+			EnterCriticalSection(&m_csEcApi);
 			const int value = m_pfnGetFANRPM[i]();
-			if (value == 0)
-			{
-				m_nCurRPM[i] = 0;
-			}
-			else if (value > 300 && value < 5000)
-			{
-				m_nCurRPM[i] = 2100000 / value;
-			}
+			LeaveCriticalSection(&m_csEcApi);
+			m_nCurRPM[i] = DecodeFanRpmCounter(value);
 		}
 		else
 		{
@@ -807,7 +851,7 @@ void CCore::Control(const CConfig& config)
 		CalcStdDuty(config);
 	}
 
-	if (config.SoftControl)
+	if (config.SoftControl && IsSoftControlThreadRunning())
 	{
 		EnterCriticalSection(&m_csFanControl);
 		for (int i = 0; i < 2; ++i)
@@ -926,9 +970,12 @@ void CCore::ResetFan()
 	}
 	if (m_hInstDLL != NULL && m_pfnSetFANDutyAuto != NULL)
 	{
-		m_pfnSetFANDutyAuto(1);
-		m_pfnSetFANDutyAuto(2);
-		m_pfnSetFANDutyAuto(3);
+		EnterCriticalSection(&m_csEcApi);
+		for (int fanId = 1; fanId <= m_nFanCount; ++fanId)
+		{
+			m_pfnSetFANDutyAuto(fanId);
+		}
+		LeaveCriticalSection(&m_csEcApi);
 	}
 	m_bTakeOverStatus = FALSE;
 	LeaveCriticalSection(&m_csFanControl);
@@ -944,6 +991,10 @@ void CCore::SetFanDuty()
 	EnterCriticalSection(&m_csFanControl);
 	for (int i = 0; i < 2; ++i)
 	{
+		if (i >= m_nFanCount)
+		{
+			continue;
+		}
 		if (m_nCurDuty[i] == m_nSetDuty[i])
 		{
 			continue;
@@ -958,11 +1009,13 @@ void CCore::SetFanDuty()
 			duty = 100;
 		}
 		const int hardwareDuty = static_cast<int>(duty * 255.0 / 100.0 + 0.5);
+		EnterCriticalSection(&m_csEcApi);
 		m_pfnSetFanDuty(i + 1, hardwareDuty);
-		if (i == 1)
+		if (i == 1 && m_nFanCount >= 3)
 		{
 			m_pfnSetFanDuty(i + 2, hardwareDuty);
 		}
+		LeaveCriticalSection(&m_csEcApi);
 	}
 	m_bTakeOverStatus = TRUE;
 	LeaveCriticalSection(&m_csFanControl);

@@ -20,6 +20,7 @@ BEGIN_MESSAGE_MAP(CFanCurveCtrl, CWnd)
 	ON_WM_LBUTTONUP()
 	ON_WM_LBUTTONDBLCLK()
 	ON_WM_MOUSEMOVE()
+	ON_WM_GETDLGCODE()
 	ON_WM_KEYDOWN()
 	ON_WM_CAPTURECHANGED()
 	ON_WM_CANCELMODE()
@@ -96,6 +97,10 @@ void CFanCurveCtrl::SetSelectedIndex(int index)
 
 void CFanCurveCtrl::SetCurrentTemperature(int temperature)
 {
+	if (m_currentTemperature == temperature)
+	{
+		return;
+	}
 	m_currentTemperature = temperature;
 	if (GetSafeHwnd() != NULL)
 	{
@@ -217,16 +222,17 @@ void CFanCurveCtrl::OnPaint()
 		m_currentTemperature <= FAN_CURVE_MAX_TEMP)
 	{
 		CPen currentPen(PS_DASH, 1, RGB(180, 80, 80));
-		memoryDC.SelectObject(&currentPen);
+		CPen* previousPen = memoryDC.SelectObject(&currentPen);
 		const int x = TemperatureToX(graphRect, m_currentTemperature);
 		memoryDC.MoveTo(x, graphRect.top);
 		memoryDC.LineTo(x, graphRect.bottom);
+		memoryDC.SelectObject(previousPen);
 	}
 
 	if (m_curve.size() >= 2)
 	{
 		CPen curvePen(PS_SOLID, 2, RGB(35, 95, 155));
-		memoryDC.SelectObject(&curvePen);
+		CPen* previousPen = memoryDC.SelectObject(&curvePen);
 		for (size_t i = 1; i < m_curve.size(); ++i)
 		{
 			memoryDC.MoveTo(TemperatureToX(graphRect, m_curve[i - 1].temperature),
@@ -234,6 +240,7 @@ void CFanCurveCtrl::OnPaint()
 			memoryDC.LineTo(TemperatureToX(graphRect, m_curve[i].temperature),
 				DutyToY(graphRect, m_curve[i].duty));
 		}
+		memoryDC.SelectObject(previousPen);
 	}
 
 	CBrush normalBrush(RGB(35, 95, 155));
@@ -323,7 +330,12 @@ void CFanCurveCtrl::OnMouseMove(UINT nFlags, CPoint point)
 	CWnd::OnMouseMove(nFlags, point);
 }
 
-void CFanCurveCtrl::OnKeyDown(UINT nChar, UINT /*nRepCnt*/, UINT /*nFlags*/)
+UINT CFanCurveCtrl::OnGetDlgCode()
+{
+	return CWnd::OnGetDlgCode() | DLGC_WANTARROWS;
+}
+
+void CFanCurveCtrl::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 {
 	if (nChar == VK_DELETE)
 	{
@@ -333,7 +345,7 @@ void CFanCurveCtrl::OnKeyDown(UINT nChar, UINT /*nRepCnt*/, UINT /*nFlags*/)
 
 	if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_curve.size()))
 	{
-		CWnd::OnKeyDown(nChar, 1, 0);
+		CWnd::OnKeyDown(nChar, nRepCnt, nFlags);
 		return;
 	}
 
@@ -355,7 +367,7 @@ void CFanCurveCtrl::OnKeyDown(UINT nChar, UINT /*nRepCnt*/, UINT /*nFlags*/)
 		duty -= step;
 		break;
 	default:
-		CWnd::OnKeyDown(nChar, 1, 0);
+		CWnd::OnKeyDown(nChar, nRepCnt, nFlags);
 		return;
 	}
 

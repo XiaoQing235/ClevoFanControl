@@ -90,6 +90,8 @@
     <ClCompile Include="JsonValue.cpp" />
     <ClCompile Include="PresetMatcher.cpp" />
     <ClCompile Include="PresetStore.cpp" />
+	<ClCompile Include="ProcessRunner.cpp" />
+	<ClCompile Include="UnicodeUtil.cpp" />
     <ClCompile Include="SingleInstance.cpp" />
     <ClCompile Include="TaskXml.cpp" />
   </ItemGroup>

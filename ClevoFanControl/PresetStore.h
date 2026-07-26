@@ -35,8 +35,11 @@ class PresetStore
 {
 public:
 	static const char* FileName();
+	static const wchar_t* WideFileName();
 	static PresetLoadStatus Load(const std::string& path, PresetCollection* output, std::string* diagnostic);
+	static PresetLoadStatus Load(const std::wstring& path, PresetCollection* output, std::string* diagnostic);
 	static bool Save(const std::string& path, const PresetCollection& collection, std::string* diagnostic);
+	static bool Save(const std::wstring& path, const PresetCollection& collection, std::string* diagnostic);
 };
 
 bool SameControlSettings(const FanConfig& left, const FanConfig& right);

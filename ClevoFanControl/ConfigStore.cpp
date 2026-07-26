@@ -1,11 +1,13 @@
 #include "ConfigStore.h"
 #include "JsonValue.h"
+#include "UnicodeUtil.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <limits>
@@ -24,6 +26,17 @@ void ClearDiagnostic(std::string* diagnostic)
 void SetDiagnostic(std::string* diagnostic, const std::string& path, const std::string& reason)
 {
 	if (diagnostic != nullptr) *diagnostic = "ConfigStore [" + path + "]: " + reason;
+}
+
+std::string DiagnosticPath(const std::wstring& path)
+{
+	std::string utf8;
+	return WideToUtf8(path, &utf8) ? utf8 : std::string("<invalid Unicode path>");
+}
+
+void SetDiagnostic(std::string* diagnostic, const std::wstring& path, const std::string& reason)
+{
+	SetDiagnostic(diagnostic, DiagnosticPath(path), reason);
 }
 
 std::string WindowsError(const char* operation, DWORD errorCode)
@@ -101,6 +114,73 @@ ReadStatus ReadJsonText(const std::string& path, std::string* text, std::string*
 	if (stream.fail())
 	{
 		SetDiagnostic(diagnostic, path, "cannot close the file after reading");
+		return ReadStatus::IoError;
+	}
+	return ReadStatus::Loaded;
+}
+
+ReadStatus ReadJsonText(const std::wstring& path, std::string* text, std::string* diagnostic)
+{
+	const DWORD attributes = GetFileAttributesW(path.c_str());
+	if (attributes == INVALID_FILE_ATTRIBUTES)
+	{
+		const DWORD errorCode = GetLastError();
+		if (errorCode == ERROR_FILE_NOT_FOUND || errorCode == ERROR_PATH_NOT_FOUND)
+		{
+			SetDiagnostic(diagnostic, path, "file is missing");
+			return ReadStatus::Missing;
+		}
+		SetDiagnostic(diagnostic, path, WindowsError("cannot inspect file", errorCode));
+		return ReadStatus::IoError;
+	}
+	if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U)
+	{
+		SetDiagnostic(diagnostic, path, "path is a directory");
+		return ReadStatus::IoError;
+	}
+
+	HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		SetDiagnostic(diagnostic, path, WindowsError("cannot open file for reading", GetLastError()));
+		return ReadStatus::IoError;
+	}
+	LARGE_INTEGER size = {};
+	if (!GetFileSizeEx(file, &size))
+	{
+		const DWORD error = GetLastError();
+		CloseHandle(file);
+		SetDiagnostic(diagnostic, path, WindowsError("cannot determine file length", error));
+		return ReadStatus::IoError;
+	}
+	if (size.QuadPart < 0 || static_cast<uint64_t>(size.QuadPart) > kMaxJsonFileSize)
+	{
+		CloseHandle(file);
+		SetDiagnostic(diagnostic, path, "JSON file exceeds the 64 KiB limit");
+		return ReadStatus::Invalid;
+	}
+
+	text->assign(static_cast<size_t>(size.QuadPart), '\0');
+	size_t offset = 0;
+	while (offset < text->size())
+	{
+		DWORD bytesRead = 0;
+		const DWORD requested = static_cast<DWORD>((std::min)(
+			text->size() - offset, static_cast<size_t>(MAXDWORD)));
+		if (!ReadFile(file, &(*text)[offset], requested, &bytesRead, NULL) || bytesRead == 0)
+		{
+			const DWORD error = GetLastError();
+			CloseHandle(file);
+			SetDiagnostic(diagnostic, path, WindowsError("cannot read the complete file", error));
+			return ReadStatus::IoError;
+		}
+		offset += bytesRead;
+	}
+	if (!CloseHandle(file))
+	{
+		SetDiagnostic(diagnostic, path, WindowsError("cannot close the file after reading", GetLastError()));
 		return ReadStatus::IoError;
 	}
 	return ReadStatus::Loaded;
@@ -334,11 +414,72 @@ bool SaveTextAtomically(const std::string& path, const std::string& text, std::s
 	}
 	return true;
 }
+
+std::wstring MakeTempPath(const std::wstring& path)
+{
+	const unsigned long sequence = g_tempSequence.fetch_add(1, std::memory_order_relaxed);
+	std::wostringstream suffix;
+	suffix << path << L".tmp." << static_cast<unsigned long>(GetCurrentProcessId()) << L"."
+		<< static_cast<unsigned long long>(GetTickCount64()) << L"." << sequence;
+	return suffix.str();
+}
+
+bool SaveTextAtomically(const std::wstring& path, const std::string& text,
+	std::string* diagnostic)
+{
+	const std::wstring temporaryPath = MakeTempPath(path);
+	HANDLE file = CreateFileW(temporaryPath.c_str(), GENERIC_WRITE, 0, NULL,
+		CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (file == INVALID_HANDLE_VALUE)
+	{
+		SetDiagnostic(diagnostic, path, WindowsError("cannot create temporary file", GetLastError()));
+		return false;
+	}
+
+	DWORD failure = ERROR_SUCCESS;
+	size_t offset = 0;
+	while (offset < text.size())
+	{
+		const DWORD requested = static_cast<DWORD>((std::min)(
+			text.size() - offset, static_cast<size_t>(MAXDWORD)));
+		DWORD written = 0;
+		if (!WriteFile(file, text.data() + offset, requested, &written, NULL) || written == 0)
+		{
+			failure = GetLastError();
+			if (failure == ERROR_SUCCESS) failure = ERROR_WRITE_FAULT;
+			break;
+		}
+		offset += written;
+	}
+	if (failure == ERROR_SUCCESS && !FlushFileBuffers(file)) failure = GetLastError();
+	if (!CloseHandle(file) && failure == ERROR_SUCCESS) failure = GetLastError();
+	if (failure != ERROR_SUCCESS)
+	{
+		DeleteFileW(temporaryPath.c_str());
+		SetDiagnostic(diagnostic, path, WindowsError("cannot write temporary file", failure));
+		return false;
+	}
+	if (!MoveFileExW(temporaryPath.c_str(), path.c_str(),
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+	{
+		const DWORD errorCode = GetLastError();
+		DeleteFileW(temporaryPath.c_str());
+		SetDiagnostic(diagnostic, path,
+			WindowsError("cannot atomically replace target", errorCode));
+		return false;
+	}
+	return true;
+}
 }
 
 const char* ConfigStore::FileName()
 {
 	return "ClevoFanControl.json";
+}
+
+const wchar_t* ConfigStore::WideFileName()
+{
+	return L"ClevoFanControl.json";
 }
 
 ConfigLoadStatus ConfigStore::Load(const std::string& path, FanConfig* output, std::string* diagnostic)
@@ -368,6 +509,61 @@ ConfigLoadStatus ConfigStore::Load(const std::string& path, FanConfig* output, s
 }
 
 bool ConfigStore::Save(const std::string& path, const FanConfig& config, std::string* diagnostic)
+{
+	ClearDiagnostic(diagnostic);
+	std::string validationError;
+	if (!config.Validate(&validationError))
+	{
+		SetDiagnostic(diagnostic, path, "configuration is invalid: " + validationError);
+		return false;
+	}
+	JsonValue root = BuildConfig(config);
+	std::string text;
+	std::string serializationError;
+	if (!root.Serialize(&text, true, &serializationError))
+	{
+		SetDiagnostic(diagnostic, path, "cannot serialize JSON: " + serializationError);
+		return false;
+	}
+	if (text.size() > kMaxJsonFileSize)
+	{
+		SetDiagnostic(diagnostic, path, "serialized JSON exceeds the 64 KiB limit");
+		return false;
+	}
+	if (!SaveTextAtomically(path, text, diagnostic)) return false;
+	ClearDiagnostic(diagnostic);
+	return true;
+}
+
+ConfigLoadStatus ConfigStore::Load(const std::wstring& path, FanConfig* output,
+	std::string* diagnostic)
+{
+	ClearDiagnostic(diagnostic);
+	if (output == nullptr)
+	{
+		SetDiagnostic(diagnostic, path, "output is null");
+		return ConfigLoadStatus::Invalid;
+	}
+	output->LoadDefault();
+	std::string text;
+	const ReadStatus status = ReadJsonText(path, &text, diagnostic);
+	if (status == ReadStatus::Missing) return ConfigLoadStatus::Missing;
+	if (status == ReadStatus::IoError) return ConfigLoadStatus::IoError;
+	if (status == ReadStatus::Invalid) return ConfigLoadStatus::Invalid;
+	std::string reason;
+	FanConfig candidate;
+	if (!ParseConfig(text, &candidate, &reason))
+	{
+		SetDiagnostic(diagnostic, path, reason);
+		return ConfigLoadStatus::Invalid;
+	}
+	*output = candidate;
+	ClearDiagnostic(diagnostic);
+	return ConfigLoadStatus::Loaded;
+}
+
+bool ConfigStore::Save(const std::wstring& path, const FanConfig& config,
+	std::string* diagnostic)
 {
 	ClearDiagnostic(diagnostic);
 	std::string validationError;

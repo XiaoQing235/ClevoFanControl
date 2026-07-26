@@ -3,8 +3,14 @@
 #include "ClevoFanControlDlg.h"
 #include "PresetMatcher.h"
 #include "PresetManagerDlg.h"
+#include "ProcessRunner.h"
 #include "TaskXml.h"
+#include "UnicodeUtil.h"
 #include "afxdialogex.h"
+
+#include <atlbase.h>
+#include <taskschd.h>
+#pragma comment(lib, "taskschd.lib")
 
 #include <algorithm>
 #include <cerrno>
@@ -34,6 +40,7 @@ static UINT WM_TASKBARCREATED = ::RegisterWindowMessage(_T("TaskbarCreated"));
 namespace
 {
 const UINT_PTR kUiTimerId = 1;
+const DWORD kAutorunOperationTimeoutMilliseconds = 10000;
 
 int CALLBACK FontFamilyProbe(const LOGFONT*, const TEXTMETRIC*, DWORD, LPARAM lParam)
 {
@@ -68,6 +75,255 @@ BOOL IsFontFamilyAvailable(LPCTSTR faceName)
 	::ReleaseDC(NULL, dc);
 	return found;
 }
+
+std::wstring GetSchtasksPath()
+{
+	wchar_t systemDirectory[MAX_PATH] = {};
+	const UINT length = GetSystemDirectoryW(systemDirectory, _countof(systemDirectory));
+	if (length == 0 || length >= _countof(systemDirectory))
+	{
+		return std::wstring();
+	}
+	return std::wstring(systemDirectory, length) + L"\\schtasks.exe";
+}
+
+class ScopedWindowDisable
+{
+public:
+	explicit ScopedWindowDisable(HWND window)
+		: m_window(window)
+		, m_restore(window != NULL && IsWindow(window) && IsWindowEnabled(window))
+	{
+		if (m_restore)
+		{
+			EnableWindow(m_window, FALSE);
+		}
+	}
+
+	~ScopedWindowDisable()
+	{
+		if (m_restore && IsWindow(m_window))
+		{
+			EnableWindow(m_window, TRUE);
+			SetActiveWindow(m_window);
+		}
+	}
+
+private:
+	ScopedWindowDisable(const ScopedWindowDisable&);
+	ScopedWindowDisable& operator=(const ScopedWindowDisable&);
+	HWND m_window;
+	BOOL m_restore;
+};
+
+enum class AutorunTaskState
+{
+	Absent,
+	PresentMatching,
+	PresentDifferent,
+	Error
+};
+
+AutorunTaskState QueryAutorunTaskState(PCWSTR taskName, PCWSTR expectedTarget)
+{
+	const HRESULT initializeResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+	const bool uninitialize = initializeResult == S_OK || initializeResult == S_FALSE;
+	if (FAILED(initializeResult) && initializeResult != RPC_E_CHANGED_MODE)
+	{
+		return AutorunTaskState::Error;
+	}
+
+	AutorunTaskState state = AutorunTaskState::Error;
+	CComPtr<ITaskService> service;
+	HRESULT result = service.CoCreateInstance(CLSID_TaskScheduler);
+	VARIANT empty;
+	VariantInit(&empty);
+	if (SUCCEEDED(result))
+	{
+		result = service->Connect(empty, empty, empty, empty);
+	}
+	CComPtr<ITaskFolder> root;
+	if (SUCCEEDED(result))
+	{
+		result = service->GetFolder(CComBSTR(L"\\"), &root);
+	}
+	CComPtr<IRegisteredTaskCollection> tasks;
+	LONG taskCount = 0;
+	if (SUCCEEDED(result))
+	{
+		result = root->GetTasks(TASK_ENUM_HIDDEN, &tasks);
+	}
+	if (SUCCEEDED(result))
+	{
+		result = tasks->get_Count(&taskCount);
+	}
+	CComPtr<IRegisteredTask> task;
+	for (LONG index = 1; SUCCEEDED(result) && index <= taskCount; ++index)
+	{
+		VARIANT itemIndex;
+		VariantInit(&itemIndex);
+		itemIndex.vt = VT_I4;
+		itemIndex.lVal = index;
+		CComPtr<IRegisteredTask> candidate;
+		result = tasks->get_Item(itemIndex, &candidate);
+		CComBSTR candidateName;
+		if (SUCCEEDED(result)) result = candidate->get_Name(&candidateName);
+		if (SUCCEEDED(result) && candidateName.Length() != 0 &&
+			CompareStringOrdinal(candidateName, -1, taskName, -1, TRUE) == CSTR_EQUAL)
+		{
+			task = candidate;
+			break;
+		}
+	}
+	if (SUCCEEDED(result) && task == NULL)
+	{
+		state = AutorunTaskState::Absent;
+	}
+	if (SUCCEEDED(result) && task != NULL)
+	{
+		state = AutorunTaskState::PresentMatching;
+		if (expectedTarget != NULL)
+		{
+			state = AutorunTaskState::PresentDifferent;
+			CComPtr<ITaskDefinition> definition;
+			CComPtr<IActionCollection> actions;
+			LONG actionCount = 0;
+			result = task->get_Definition(&definition);
+			if (SUCCEEDED(result)) result = definition->get_Actions(&actions);
+			if (SUCCEEDED(result)) result = actions->get_Count(&actionCount);
+			for (LONG index = 1; SUCCEEDED(result) && index <= actionCount; ++index)
+			{
+				CComPtr<IAction> action;
+				result = actions->get_Item(index, &action);
+				TASK_ACTION_TYPE type = TASK_ACTION_EXEC;
+				if (SUCCEEDED(result)) result = action->get_Type(&type);
+				if (SUCCEEDED(result) && type == TASK_ACTION_EXEC)
+				{
+					CComQIPtr<IExecAction> execAction(action);
+					CComBSTR registeredPath;
+					if (execAction != NULL &&
+						SUCCEEDED(execAction->get_Path(&registeredPath)) &&
+						registeredPath.Length() != 0 &&
+						CompareStringOrdinal(registeredPath, -1, expectedTarget, -1, TRUE) == CSTR_EQUAL)
+					{
+						state = AutorunTaskState::PresentMatching;
+						break;
+					}
+				}
+			}
+			if (FAILED(result)) state = AutorunTaskState::Error;
+		}
+	}
+	task.Release();
+	tasks.Release();
+	root.Release();
+	service.Release();
+	if (uninitialize)
+	{
+		CoUninitialize();
+	}
+	return state;
+}
+
+struct AutorunQueryContext
+{
+	AutorunQueryContext()
+		: references(1)
+		, hasExpectedTarget(false)
+		, state(AutorunTaskState::Error)
+	{
+	}
+
+	void AddReference()
+	{
+		InterlockedIncrement(&references);
+	}
+
+	void ReleaseReference()
+	{
+		if (InterlockedDecrement(&references) == 0)
+		{
+			delete this;
+		}
+	}
+
+	LONG references;
+	std::wstring taskName;
+	std::wstring expectedTarget;
+	bool hasExpectedTarget;
+	AutorunTaskState state;
+};
+
+unsigned __stdcall AutorunQueryThread(void* parameter)
+{
+	AutorunQueryContext* context =
+		reinterpret_cast<AutorunQueryContext*>(parameter);
+	if (context == NULL)
+	{
+		return 0;
+	}
+	try
+	{
+		context->state = QueryAutorunTaskState(context->taskName.c_str(),
+			context->hasExpectedTarget ? context->expectedTarget.c_str() : NULL);
+	}
+	catch (...)
+	{
+		context->state = AutorunTaskState::Error;
+	}
+	context->ReleaseReference();
+	return 0;
+}
+
+AutorunTaskState QueryAutorunTaskStateResponsive(PCWSTR taskName,
+	PCWSTR expectedTarget)
+{
+	if (taskName == NULL || taskName[0] == L'\0')
+	{
+		return AutorunTaskState::Error;
+	}
+	AutorunQueryContext* context = NULL;
+	try
+	{
+		context = new AutorunQueryContext;
+		context->taskName = taskName;
+		context->hasExpectedTarget = expectedTarget != NULL;
+		if (context->hasExpectedTarget)
+		{
+			context->expectedTarget = expectedTarget;
+		}
+	}
+	catch (...)
+	{
+		if (context != NULL)
+		{
+			context->ReleaseReference();
+		}
+		return AutorunTaskState::Error;
+	}
+
+	context->AddReference();
+	const uintptr_t threadValue = _beginthreadex(NULL, 0,
+		AutorunQueryThread, context, 0, NULL);
+	if (threadValue == 0)
+	{
+		context->ReleaseReference();
+		context->ReleaseReference();
+		return AutorunTaskState::Error;
+	}
+	HANDLE thread = reinterpret_cast<HANDLE>(threadValue);
+	const ResponsiveWaitResult waitResult = WaitForThreadResponsive(
+		thread, kAutorunOperationTimeoutMilliseconds);
+	CloseHandle(thread);
+	if (!waitResult.completed)
+	{
+		context->ReleaseReference();
+		return AutorunTaskState::Error;
+	}
+	const AutorunTaskState state = context->state;
+	context->ReleaseReference();
+	return state;
+}
 }
 
 namespace
@@ -91,7 +347,10 @@ END_MESSAGE_MAP()
 
 CString DiagnosticText(const std::string& diagnostic)
 {
-	return CString(CStringA(diagnostic.c_str()));
+	std::wstring wide;
+	return Utf8ToWide(diagnostic, &wide)
+		? CString(wide.c_str())
+		: CString(_T("The diagnostic contains invalid UTF-8."));
 }
 
 bool SameCurve(const FanCurvePoints& left, const FanCurvePoints& right)
@@ -272,6 +531,7 @@ BOOL CClevoFanControlDlg::OnInitDialog()
 
 	m_core.SetParentDialog(this);
 	m_core.SetUpdateRPM(TRUE);
+	m_core.RequestExit(0);
 	unsigned threadId = 0;
 	m_hCoreThread = reinterpret_cast<HANDLE>(_beginthreadex(
 		NULL, 0, &CClevoFanControlDlg::CoreThread, this, 0, &threadId));
@@ -284,9 +544,13 @@ BOOL CClevoFanControlDlg::OnInitDialog()
 		message.Format(_T("Unable to start the fan-control worker thread. (CRT error %d, Win32 error %lu)"),
 			crtError, static_cast<unsigned long>(win32Error));
 		AfxMessageBox(message, MB_ICONERROR);
+		m_bShuttingDown = TRUE;
+		m_core.SetParentDialog(NULL);
+		EndDialog(IDCANCEL);
+		return FALSE;
 	}
 	m_nUiTimerId = SetTimer(kUiTimerId, 100, NULL);
-	SetTray("ClevoFanControl");
+	SetTray(L"ClevoFanControl");
 	SetInitialWindowSize();
 	CRect initialClientRect;
 	GetClientRect(&initialClientRect);
@@ -526,8 +790,8 @@ void CClevoFanControlDlg::LayoutControls(int cx, int cy)
 
 	MoveControl(IDC_STATIC_CPU_TITLE, margin, margin, leftWidth, titleHeight);
 	MoveControl(IDC_STATIC_GPU_TITLE, margin, secondTitleTop, leftWidth, titleHeight);
-	m_cpuCurveCtrl.MoveWindow(margin, firstGraphTop, leftWidth, graphHeight);
-	m_gpuCurveCtrl.MoveWindow(margin, secondGraphTop, leftWidth, graphHeight);
+	MoveControl(IDC_CURVE_CPU, margin, firstGraphTop, leftWidth, graphHeight);
+	MoveControl(IDC_CURVE_GPU, margin, secondGraphTop, leftWidth, graphHeight);
 
 	const int statusTop = margin;
 	const int statusRowHeight = std::max(ScaleY(20), textHeight + ScaleY(4));
@@ -593,17 +857,17 @@ void CClevoFanControlDlg::LayoutControls(int cx, int cy)
 	MoveControl(IDC_STATIC_NODE_INDEX_LABEL, nodeLeft, nodeContentTop,
 		nodeIndexLabelWidth, labelHeight);
 	nodeLeft += nodeIndexLabelWidth + labelGap;
-	m_nodeIndex.MoveWindow(nodeLeft, nodeContentTop - ScaleY(3), nodeFieldWidth, editHeight);
+	MoveControl(IDC_EDIT_NODE_INDEX, nodeLeft, nodeContentTop - ScaleY(3), nodeFieldWidth, editHeight);
 	nodeLeft += nodeFieldWidth + labelGap;
 	MoveControl(IDC_STATIC_NODE_TEMP_LABEL, nodeLeft, nodeContentTop,
 		nodeTemperatureLabelWidth, labelHeight);
 	nodeLeft += nodeTemperatureLabelWidth + labelGap;
-	m_nodeTemperature.MoveWindow(nodeLeft, nodeContentTop - ScaleY(3), nodeFieldWidth, editHeight);
+	MoveControl(IDC_EDIT_NODE_TEMP, nodeLeft, nodeContentTop - ScaleY(3), nodeFieldWidth, editHeight);
 	nodeLeft += nodeFieldWidth + labelGap;
 	MoveControl(IDC_STATIC_NODE_DUTY_LABEL, nodeLeft, nodeContentTop,
 		nodeDutyLabelWidth, labelHeight);
 	nodeLeft += nodeDutyLabelWidth + labelGap;
-	m_nodeDuty.MoveWindow(nodeLeft, nodeContentTop - ScaleY(3), nodeFieldWidth, editHeight);
+	MoveControl(IDC_EDIT_NODE_DUTY, nodeLeft, nodeContentTop - ScaleY(3), nodeFieldWidth, editHeight);
 
 	const int curveLabelTop = curveToolsTop + (editHeight - labelHeight) / 2;
 	const int curveComboLeft = rightLeft + contentPadding + curveLabelWidth + labelGap;
@@ -611,7 +875,7 @@ void CClevoFanControlDlg::LayoutControls(int cx, int cy)
 		rightWidth - (curveComboLeft - rightLeft) - contentPadding);
 	MoveControl(IDC_STATIC_CURVE_LABEL, rightLeft + contentPadding, curveLabelTop,
 		curveLabelWidth, labelHeight);
-	m_curveSelector.MoveWindow(curveComboLeft, curveToolsTop, curveComboWidth, editHeight);
+	MoveControl(IDC_COMBO_CURVE, curveComboLeft, curveToolsTop, curveComboWidth, editHeight);
 	m_curveSelector.SendMessage(CB_SETMINVISIBLE, 2, 0);
 	m_curveSelector.SetDroppedWidth(curveComboWidth);
 	const int curveButtonsLeft = rightLeft + contentPadding;
@@ -640,13 +904,13 @@ void CClevoFanControlDlg::LayoutControls(int cx, int cy)
 	const int secondFieldLeft = secondColumnLeft + transitionLabelWidth + labelGap;
 	MoveControl(IDC_STATIC_INTERVAL_LABEL, firstColumnLeft, settingsContentTop,
 		intervalLabelWidth, labelHeight);
-	m_ctlInterval.MoveWindow(firstFieldLeft, settingsContentTop - ScaleY(3), ScaleX(44), editHeight);
+	MoveControl(IDC_EDIT_INTERVAL, firstFieldLeft, settingsContentTop - ScaleY(3), ScaleX(44), editHeight);
 	MoveControl(IDC_STATIC_TRANSITION_LABEL, secondColumnLeft, settingsContentTop,
 		transitionLabelWidth, labelHeight);
-	m_ctlTransition.MoveWindow(secondFieldLeft, settingsContentTop - ScaleY(3), ScaleX(44), editHeight);
+	MoveControl(IDC_EDIT_TREANSITION, secondFieldLeft, settingsContentTop - ScaleY(3), ScaleX(44), editHeight);
 	MoveControl(IDC_STATIC_FORCE_LABEL, firstColumnLeft, settingsRow2Top,
 		forceLabelWidth, labelHeight);
-	m_ctlForceTemp.MoveWindow(firstColumnLeft + forceLabelWidth + labelGap,
+	MoveControl(IDC_EDIT_FORCE_TEMP, firstColumnLeft + forceLabelWidth + labelGap,
 		settingsRow2Top - ScaleY(3), ScaleX(44), editHeight);
 
 	const int secondCheckLeft = firstColumnLeft + checkColumnWidth + labelGap;
@@ -664,7 +928,7 @@ void CClevoFanControlDlg::LayoutControls(int cx, int cy)
 		rightWidth - (closeComboLeft - rightLeft) - contentPadding);
 	MoveControl(IDC_STATIC_CLOSE_BEHAVIOR_LABEL, firstColumnLeft, closeLabelTop,
 		closeLabelWidth, labelHeight);
-	m_closeBehavior.MoveWindow(closeComboLeft, closeTop, closeComboWidth, editHeight);
+	MoveControl(IDC_COMBO_CLOSE_BEHAVIOR, closeComboLeft, closeTop, closeComboWidth, editHeight);
 	m_closeBehavior.SendMessage(CB_SETMINVISIBLE, 2, 0);
 	m_closeBehavior.SetDroppedWidth(closeComboWidth);
 	const int fontLabelTop = fontTop + (editHeight - labelHeight) / 2;
@@ -672,8 +936,8 @@ void CClevoFanControlDlg::LayoutControls(int cx, int cy)
 	const int fontSpinLeft = fontEditLeft + fontEditWidth;
 	MoveControl(IDC_STATIC_FONT_SIZE_LABEL, firstColumnLeft, fontLabelTop,
 		fontLabelWidth, labelHeight);
-	m_fontSize.MoveWindow(fontEditLeft, fontTop - ScaleY(3), fontEditWidth, editHeight);
-	m_fontSizeSpin.MoveWindow(fontSpinLeft, fontTop - ScaleY(3), fontSpinWidth, editHeight);
+	MoveControl(IDC_EDIT_FONT_SIZE, fontEditLeft, fontTop - ScaleY(3), fontEditWidth, editHeight);
+	MoveControl(IDC_SPIN_FONT_SIZE, fontSpinLeft, fontTop - ScaleY(3), fontSpinWidth, editHeight);
 
 	const int actionTop = buttonTop;
 	const int actionWidth = std::max(1, (rightWidth - actionGap * 3) / 4);
@@ -685,7 +949,7 @@ void CClevoFanControlDlg::LayoutControls(int cx, int cy)
 			left, actionTop, actionWidth, buttonHeight);
 	}
 
-	RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+	RedrawWindow(NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
 }
 
 void CClevoFanControlDlg::MoveControl(int id, int left, int top, int width, int height, BOOL show)
@@ -699,11 +963,15 @@ void CClevoFanControlDlg::MoveControl(int id, int left, int top, int width, int 
 	control->GetWindowRect(&oldRect);
 	ScreenToClient(&oldRect);
 	const CRect newRect(left, top, left + std::max(1, width), top + std::max(1, height));
-	control->MoveWindow(newRect, TRUE);
-	control->ShowWindow(show ? SW_SHOW : SW_HIDE);
-	CRect dirtyRect;
-	dirtyRect.UnionRect(&oldRect, &newRect);
-	InvalidateRect(&dirtyRect, TRUE);
+	if (oldRect != newRect)
+	{
+		control->MoveWindow(newRect, FALSE);
+	}
+	const BOOL currentlyVisible = control->IsWindowVisible();
+	if (currentlyVisible != show)
+	{
+		control->ShowWindow(show ? SW_SHOW : SW_HIDE);
+	}
 }
 
 void CClevoFanControlDlg::InitializeStatusColumns()
@@ -770,7 +1038,9 @@ void CClevoFanControlDlg::ApplyUIFont()
 		pointSize = FAN_UI_FONT_SIZE_DEFAULT;
 	}
 
-	if (m_uiFont.GetSafeHandle() == NULL || m_uiFontPointSize != pointSize || m_uiFontDpiY != m_dpiY)
+	const BOOL fontChanged = m_uiFont.GetSafeHandle() == NULL ||
+		m_uiFontPointSize != pointSize || m_uiFontDpiY != m_dpiY;
+	if (fontChanged)
 	{
 		LOGFONT logFont = {};
 		HFONT defaultFont = static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
@@ -798,6 +1068,10 @@ void CClevoFanControlDlg::ApplyUIFont()
 		}
 		m_uiFontDpiY = m_dpiY;
 		m_uiFontPointSize = pointSize;
+	}
+	else
+	{
+		return;
 	}
 
 	SetFont(&m_uiFont, TRUE);
@@ -914,10 +1188,16 @@ void CClevoFanControlDlg::RefreshStatus()
 		return;
 	}
 	const BOOL gpuAvailable = status.gpuAvailable;
-	const BOOL ecReady = status.ecReady;
+	const auto setStatusText = [this](int item, int subItem, const CString& value)
+	{
+		if (m_ctlStatus.GetItemText(item, subItem) != value)
+		{
+			m_ctlStatus.SetItemText(item, subItem, value);
+		}
+	};
 	for (int i = 0; i < 2; ++i)
 	{
-		const BOOL available = ecReady && (i == 0 || gpuAvailable);
+		const BOOL available = i == 0 ? status.cpuAvailable : gpuAvailable;
 		CString text;
 		if (available)
 		{
@@ -927,13 +1207,13 @@ void CClevoFanControlDlg::RefreshStatus()
 		{
 			text = _T("--");
 		}
-		m_ctlStatus.SetItemText(0, i + 1, text);
+		setStatusText(0, i + 1, text);
 		text.Format(_T("%d"), status.targetCurveLevel[i]);
-		m_ctlStatus.SetItemText(1, i + 1, available ? text : _T("--"));
+		setStatusText(1, i + 1, available ? text : CString(_T("--")));
 		text.Format(_T("%d%%"), status.targetDuty[i]);
-		m_ctlStatus.SetItemText(2, i + 1, available ? text : _T("--"));
+		setStatusText(2, i + 1, available ? text : CString(_T("--")));
 		text.Format(_T("%d%%"), status.currentDuty[i]);
-		m_ctlStatus.SetItemText(3, i + 1, available ? text : _T("--"));
+		setStatusText(3, i + 1, available ? text : CString(_T("--")));
 		if (available && status.currentRPM[i] >= 0)
 		{
 			text.Format(_T("%d"), status.currentRPM[i]);
@@ -942,10 +1222,10 @@ void CClevoFanControlDlg::RefreshStatus()
 		{
 			text = _T("--");
 		}
-		m_ctlStatus.SetItemText(4, i + 1, text);
+		setStatusText(4, i + 1, text);
 	}
-	m_cpuCurveCtrl.SetCurrentTemperature(status.ecReady ? status.currentTemperature[0] : -1);
-	m_gpuCurveCtrl.SetCurrentTemperature(status.ecReady && status.gpuAvailable ? status.currentTemperature[1] : -1);
+	m_cpuCurveCtrl.SetCurrentTemperature(status.cpuAvailable ? status.currentTemperature[0] : -1);
+	m_gpuCurveCtrl.SetCurrentTemperature(status.gpuAvailable ? status.currentTemperature[1] : -1);
 }
 
 void CClevoFanControlDlg::OnTimer(UINT_PTR nIDEvent)
@@ -961,8 +1241,6 @@ void CClevoFanControlDlg::OnTimer(UINT_PTR nIDEvent)
 		m_bStartupPending = FALSE;
 		ShowWindowFromTray();
 	}
-	// Keep telemetry current while the window is hidden in the notification area.
-	m_core.SetUpdateRPM(TRUE);
 	ScanPresetProcesses();
 	CCoreStatusSnapshot status = {};
 	if (!m_core.GetStatusSnapshot(&status))
@@ -978,18 +1256,18 @@ void CClevoFanControlDlg::OnTimer(UINT_PTR nIDEvent)
 		m_nLastCoreUpdateTime = status.lastUpdateTime;
 		if (m_bTrayAdded)
 		{
-			char tip[128];
-			if (status.ecReady && status.gpuAvailable)
+			wchar_t tip[128];
+			if (status.cpuAvailable && status.gpuAvailable)
 			{
-				sprintf_s(tip, sizeof(tip), "CPU %d C %d%% | GPU %d C %d%%", status.currentTemperature[0], status.currentDuty[0], status.currentTemperature[1], status.currentDuty[1]);
+				swprintf_s(tip, _countof(tip), L"CPU %d C %d%% | GPU %d C %d%%", status.currentTemperature[0], status.currentDuty[0], status.currentTemperature[1], status.currentDuty[1]);
 			}
-			else if (status.ecReady)
+			else if (status.cpuAvailable)
 			{
-				sprintf_s(tip, sizeof(tip), "CPU %d C %d%% | GPU --", status.currentTemperature[0], status.currentDuty[0]);
+				swprintf_s(tip, _countof(tip), L"CPU %d C %d%% | GPU --", status.currentTemperature[0], status.currentDuty[0]);
 			}
 			else
 			{
-				strcpy_s(tip, sizeof(tip), "CPU -- | GPU --");
+				wcscpy_s(tip, _countof(tip), L"CPU -- | GPU --");
 			}
 			SetTray(tip);
 		}
@@ -1017,20 +1295,18 @@ void CClevoFanControlDlg::StopCoreThread()
 	}
 }
 
-std::string CClevoFanControlDlg::ConfigurationPath() const
+std::wstring CClevoFanControlDlg::ConfigurationPath() const
 {
-	CStringA path(GetExePath());
-	path += "\\";
-	path += ConfigStore::FileName();
-	return std::string(path.GetString());
+	CString path(GetExePath());
+	path += ConfigStore::WideFileName();
+	return std::wstring(path.GetString());
 }
 
-std::string CClevoFanControlDlg::PresetConfigurationPath() const
+std::wstring CClevoFanControlDlg::PresetConfigurationPath() const
 {
-	CStringA path(GetExePath());
-	path += "\\";
-	path += PresetStore::FileName();
-	return std::string(path.GetString());
+	CString path(GetExePath());
+	path += PresetStore::WideFileName();
+	return std::wstring(path.GetString());
 }
 
 BOOL CClevoFanControlDlg::SavePresetCollection(const PresetCollection& collection, CString* error)
@@ -1145,14 +1421,14 @@ void CClevoFanControlDlg::ScanPresetProcesses()
 	}
 	m_lastPresetScanTick = now;
 
-	std::vector<std::string> processNames;
+	std::vector<std::wstring> processNames;
 	std::string diagnostic;
 	if (!CollectRunningProcessNames(&processNames, &diagnostic))
 	{
 		static ULONGLONG lastTraceTick = 0;
 		if (lastTraceTick == 0 || now - lastTraceTick >= 5000)
 		{
-			TRACE("Preset process scan failed: %s\n", diagnostic.c_str());
+			TRACE("Preset process scan failed: %hs\n", diagnostic.c_str());
 			lastTraceTick = now;
 		}
 		return;
@@ -1257,10 +1533,10 @@ BOOL CClevoFanControlDlg::ParseEditInteger(const CEdit& edit, int* value) const
 	{
 		return FALSE;
 	}
-	const char* start = text.GetString();
-	char* end = NULL;
+	const wchar_t* start = text.GetString();
+	wchar_t* end = NULL;
 	errno = 0;
-	const long parsed = strtol(start, &end, 10);
+	const long parsed = wcstol(start, &end, 10);
 	if (errno == ERANGE || end == start || *end != '\0' || parsed < INT_MIN || parsed > INT_MAX)
 	{
 		return FALSE;
@@ -1280,9 +1556,16 @@ void CClevoFanControlDlg::SyncSelectedNodeToControls()
 		return;
 	}
 	int selected = m_nSelectedCurve == 0 ? m_cpuCurveCtrl.GetSelectedIndex() : m_gpuCurveCtrl.GetSelectedIndex();
-	if (selected < 0 || selected >= static_cast<int>(curve->size()))
+	if (selected < 0)
 	{
-		selected = 0;
+		m_nodeIndex.SetWindowText(_T(""));
+		m_nodeTemperature.SetWindowText(_T(""));
+		m_nodeDuty.SetWindowText(_T(""));
+		return;
+	}
+	if (selected >= static_cast<int>(curve->size()))
+	{
+		selected = static_cast<int>(curve->size()) - 1;
 	}
 	if (m_nSelectedCurve == 0)
 	{
@@ -1304,8 +1587,8 @@ void CClevoFanControlDlg::RefreshCurves()
 	CCoreStatusSnapshot status = {};
 	if (m_core.GetStatusSnapshot(&status))
 	{
-		m_cpuCurveCtrl.SetCurrentTemperature(status.ecReady ? status.currentTemperature[0] : -1);
-		m_gpuCurveCtrl.SetCurrentTemperature(status.ecReady && status.gpuAvailable ? status.currentTemperature[1] : -1);
+		m_cpuCurveCtrl.SetCurrentTemperature(status.cpuAvailable ? status.currentTemperature[0] : -1);
+		m_gpuCurveCtrl.SetCurrentTemperature(status.gpuAvailable ? status.currentTemperature[1] : -1);
 	}
 	else
 	{
@@ -1358,42 +1641,13 @@ void CClevoFanControlDlg::UpdateActivePresetStatus()
 	else
 	{
 		text = _T("Active preset: ");
-		text += CString(CStringA(m_presets.presets[m_nActivePreset].name.c_str()));
+		std::wstring presetName;
+		if (Utf8ToWide(m_presets.presets[m_nActivePreset].name, &presetName))
+		{
+			text += presetName.c_str();
+		}
 	}
 
-	CRect clientRect;
-	m_activePresetStatus.GetClientRect(&clientRect);
-	if (clientRect.Width() > 0)
-	{
-		CClientDC dc(&m_activePresetStatus);
-		CFont* oldFont = NULL;
-		if (m_uiFont.GetSafeHandle() != NULL)
-		{
-			oldFont = dc.SelectObject(&m_uiFont);
-		}
-		const int availableWidth = clientRect.Width();
-		const CString ellipsis = _T("...");
-		if (dc.GetTextExtent(text).cx > availableWidth)
-		{
-			while (text.GetLength() > ellipsis.GetLength() &&
-				dc.GetTextExtent(text + ellipsis).cx > availableWidth)
-			{
-				text.Delete(text.GetLength() - 1, 1);
-			}
-			if (dc.GetTextExtent(text).cx > availableWidth)
-			{
-				text = ellipsis;
-			}
-			else if (dc.GetTextExtent(text + ellipsis).cx <= availableWidth)
-			{
-				text += ellipsis;
-			}
-		}
-		if (oldFont != NULL)
-		{
-			dc.SelectObject(oldFont);
-		}
-	}
 	m_activePresetStatus.SetWindowText(text);
 }
 
@@ -1597,8 +1851,12 @@ BOOL CClevoFanControlDlg::SaveDraft()
 
 	const BOOL oldAutoRun = m_bSavedAutoRun;
 	const BOOL newAutoRun = candidateGlobal.AutoRun;
-	if (oldAutoRun != newAutoRun && !SetAutorunTask(TRUE, newAutoRun))
+	if (oldAutoRun != newAutoRun && !SetAutorunTask(newAutoRun))
 	{
+		if (!SetAutorunTask(oldAutoRun))
+		{
+			TRACE0("Unable to restore the previous autorun task state after a failed change\n");
+		}
 		m_ctlAutorun.SetCheck(oldAutoRun ? BST_CHECKED : BST_UNCHECKED);
 		m_draft.AutoRun = oldAutoRun != FALSE;
 		return FALSE;
@@ -1608,7 +1866,7 @@ BOOL CClevoFanControlDlg::SaveDraft()
 	{
 		if (oldAutoRun != newAutoRun)
 		{
-			SetAutorunTask(TRUE, oldAutoRun);
+			SetAutorunTask(oldAutoRun);
 		}
 		AfxMessageBox(_T("The configuration could not be applied to the worker; no configuration files were changed."), MB_ICONERROR);
 		return FALSE;
@@ -1620,7 +1878,7 @@ BOOL CClevoFanControlDlg::SaveDraft()
 		m_core.ApplyConfig(oldAppliedConfig);
 		if (oldAutoRun != newAutoRun)
 		{
-			SetAutorunTask(TRUE, oldAutoRun);
+			SetAutorunTask(oldAutoRun);
 		}
 		AfxMessageBox(DiagnosticText(diagnostic), MB_ICONERROR);
 		return FALSE;
@@ -1633,11 +1891,11 @@ BOOL CClevoFanControlDlg::SaveDraft()
 			std::string rollbackDiagnostic;
 			if (!ConfigStore::Save(ConfigurationPath(), oldGlobalConfig, &rollbackDiagnostic))
 			{
-				TRACE("Unable to roll back global configuration: %s\n", rollbackDiagnostic.c_str());
+				TRACE("Unable to roll back global configuration: %hs\n", rollbackDiagnostic.c_str());
 			}
 			if (oldAutoRun != newAutoRun)
 			{
-				SetAutorunTask(TRUE, oldAutoRun);
+				SetAutorunTask(oldAutoRun);
 			}
 			AfxMessageBox(DiagnosticText(diagnostic), MB_ICONERROR);
 			return FALSE;
@@ -1999,9 +2257,9 @@ void CClevoFanControlDlg::HideWindowToTray()
 	ShowWindow(SW_HIDE);
 }
 
-void CClevoFanControlDlg::SetTray(PCSTR string)
+void CClevoFanControlDlg::SetTray(PCWSTR string)
 {
-	NOTIFYICONDATAA nid = {0};
+	NOTIFYICONDATAW nid = {0};
 	nid.cbSize = sizeof(nid);
 	nid.hWnd = m_hWnd;
 	nid.uID = IDR_MAINFRAME;
@@ -2010,19 +2268,19 @@ void CClevoFanControlDlg::SetTray(PCSTR string)
 	nid.hIcon = LoadIcon(AfxGetInstanceHandle(), MAKEINTRESOURCE(IDR_MAINFRAME));
 	if (string != NULL)
 	{
-		strcpy_s(nid.szTip, sizeof(nid.szTip), string);
+		wcsncpy_s(nid.szTip, _countof(nid.szTip), string, _TRUNCATE);
 		if (!m_bTrayAdded)
 		{
-			m_bTrayAdded = Shell_NotifyIconA(NIM_ADD, &nid);
+			m_bTrayAdded = Shell_NotifyIconW(NIM_ADD, &nid);
 		}
 		else
 		{
-			Shell_NotifyIconA(NIM_MODIFY, &nid);
+			Shell_NotifyIconW(NIM_MODIFY, &nid);
 		}
 	}
 	else
 	{
-		Shell_NotifyIconA(NIM_DELETE, &nid);
+		Shell_NotifyIconW(NIM_DELETE, &nid);
 		m_bTrayAdded = FALSE;
 	}
 }
@@ -2071,7 +2329,7 @@ LRESULT CClevoFanControlDlg::OnShowTask(WPARAM wParam, LPARAM lParam)
 LRESULT CClevoFanControlDlg::OnTaskbarCreated(WPARAM, LPARAM)
 {
 	m_bTrayAdded = FALSE;
-	SetTray("ClevoFanControl");
+	SetTray(L"ClevoFanControl");
 	return 0;
 }
 
@@ -2080,91 +2338,75 @@ BOOL CClevoFanControlDlg::SetAutorunReg(BOOL, BOOL)
 	return FALSE;
 }
 
-BOOL CClevoFanControlDlg::SetAutorunTask(BOOL bWrite, BOOL bAutorun)
+BOOL CClevoFanControlDlg::SetAutorunTask(BOOL bAutorun)
 {
-	const CString taskName = _T("ClevoFanControl");
-	const CString targetPath = GetExePath() + _T("\\ClevoFanControl.exe");
-	const CString xmlPath = GetExePath() + _T("\\ClevoFanControl.task.xml");
-	if (!bWrite)
+	const CStringW taskName = L"ClevoFanControl";
+	const CString targetPath = GetExePath() + _T("ClevoFanControl.exe");
+	const CString xmlPath = GetExePath() + _T("ClevoFanControl.task.xml");
+	const std::wstring schtasksPath = GetSchtasksPath();
+	if (schtasksPath.empty())
 	{
-		CString output = ExecuteCmd(_T("SCHTASKS /Query /TN \"ClevoFanControl\""));
-		return output.Find(taskName) >= 0;
+		return FALSE;
 	}
+	ScopedWindowDisable disableWindow(m_hWnd);
+	CWaitCursor waitCursor;
+
+	CStringW arguments;
 	if (bAutorun)
 	{
-		if (!CreateTaskXml(CStringA(xmlPath).GetString(), CStringA(targetPath).GetString()))
+		if (!CreateTaskXml(xmlPath.GetString(), targetPath.GetString()))
 		{
 			return FALSE;
 		}
-		CString command;
-		command.Format(_T("SCHTASKS /Create /F /XML \"%s\" /TN \"%s\""), xmlPath.GetString(), taskName.GetString());
-		ExecuteCmd(command);
+		const CStringW wideXmlPath(xmlPath);
+		arguments.Format(L"/Create /F /XML \"%s\" /TN \"%s\"",
+			wideXmlPath.GetString(), taskName.GetString());
+		const ProcessRunResult result = RunProcessResponsive(schtasksPath,
+			std::wstring(arguments.GetString()), kAutorunOperationTimeoutMilliseconds);
 		DeleteFile(xmlPath);
-		return SetAutorunTask(FALSE, FALSE);
+		if (!result.Succeeded())
+		{
+			TRACE("Unable to create autorun task: error %lu, exit code %lu\n",
+				static_cast<unsigned long>(result.errorCode),
+				static_cast<unsigned long>(result.exitCode));
+		}
+		if (!result.Succeeded())
+		{
+			return FALSE;
+		}
+		return QueryAutorunTaskStateResponsive(taskName.GetString(),
+			targetPath.GetString()) ==
+			AutorunTaskState::PresentMatching ? TRUE : FALSE;
 	}
-	CString command;
-	command.Format(_T("SCHTASKS /Delete /F /TN \"%s\""), taskName.GetString());
-	ExecuteCmd(command);
-	return !SetAutorunTask(FALSE, FALSE);
+	const AutorunTaskState currentState =
+		QueryAutorunTaskStateResponsive(taskName.GetString(), NULL);
+	if (currentState == AutorunTaskState::Absent)
+	{
+		return TRUE;
+	}
+	if (currentState == AutorunTaskState::Error)
+	{
+		return FALSE;
+	}
+	arguments.Format(L"/Delete /F /TN \"%s\"", taskName.GetString());
+	const ProcessRunResult result = RunProcessResponsive(schtasksPath,
+		std::wstring(arguments.GetString()), kAutorunOperationTimeoutMilliseconds);
+	if (!result.Succeeded())
+	{
+		TRACE("Unable to delete autorun task: error %lu, exit code %lu\n",
+			static_cast<unsigned long>(result.errorCode),
+			static_cast<unsigned long>(result.exitCode));
+	}
+	if (!result.Succeeded())
+	{
+		return FALSE;
+	}
+	return QueryAutorunTaskStateResponsive(taskName.GetString(), NULL) ==
+		AutorunTaskState::Absent
+		? TRUE : FALSE;
 }
 
-CString CClevoFanControlDlg::ExecuteCmd(CString command)
-{
-	SECURITY_ATTRIBUTES attributes = {sizeof(attributes), NULL, TRUE};
-	HANDLE readHandle = NULL;
-	HANDLE writeHandle = NULL;
-	if (!CreatePipe(&readHandle, &writeHandle, &attributes, 0))
-	{
-		return _T("[failed]");
-	}
-	SetHandleInformation(readHandle, HANDLE_FLAG_INHERIT, 0);
-	STARTUPINFO startup = {sizeof(startup)};
-	PROCESS_INFORMATION process = {0};
-	startup.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
-	startup.wShowWindow = SW_HIDE;
-	startup.hStdOutput = writeHandle;
-	startup.hStdError = writeHandle;
-	CStringA commandLine(command);
-	char buffer[1024];
-	strcpy_s(buffer, sizeof(buffer), commandLine.GetString());
-	if (!CreateProcessA(NULL, buffer, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &startup, &process))
-	{
-		CloseHandle(readHandle);
-		CloseHandle(writeHandle);
-		return _T("[failed]");
-	}
-	CloseHandle(writeHandle);
-	const DWORD waitResult = WaitForSingleObject(process.hProcess, 5000);
-	if (waitResult == WAIT_TIMEOUT)
-	{
-		TerminateProcess(process.hProcess, ERROR_TIMEOUT);
-		CloseHandle(readHandle);
-		CloseHandle(process.hThread);
-		CloseHandle(process.hProcess);
-		return _T("[timeout]");
-	}
-	if (waitResult != WAIT_OBJECT_0)
-	{
-		CloseHandle(readHandle);
-		CloseHandle(process.hThread);
-		CloseHandle(process.hProcess);
-		return _T("[failed]");
-	}
-	CStringA output;
-	char outputBuffer[4096];
-	DWORD bytesRead = 0;
-	while (ReadFile(readHandle, outputBuffer, sizeof(outputBuffer) - 1, &bytesRead, NULL) && bytesRead != 0)
-	{
-		outputBuffer[bytesRead] = '\0';
-		output += outputBuffer;
-	}
-	CloseHandle(readHandle);
-	CloseHandle(process.hThread);
-	CloseHandle(process.hProcess);
-	return CString(output);
-}
-
-BOOL CClevoFanControlDlg::CreateTaskXml(PCSTR strXmlPath, PCSTR strTargetPath)
+BOOL CClevoFanControlDlg::CreateTaskXml(PCWSTR strXmlPath, PCWSTR strTargetPath)
 {
 	if (strXmlPath == NULL || strTargetPath == NULL)
 	{
@@ -2172,51 +2414,33 @@ BOOL CClevoFanControlDlg::CreateTaskXml(PCSTR strXmlPath, PCSTR strTargetPath)
 		return FALSE;
 	}
 
-	const size_t targetLength = strlen(strTargetPath);
+	const size_t targetLength = wcslen(strTargetPath);
 	if (targetLength == 0 || targetLength > static_cast<size_t>(INT_MAX))
 	{
 		SetLastError(targetLength == 0 ? ERROR_INVALID_PARAMETER : ERROR_FILENAME_EXCED_RANGE);
 		return FALSE;
 	}
 
-	const int sourceLength = static_cast<int>(targetLength);
-	const int wideLength = MultiByteToWideChar(CP_ACP, 0, strTargetPath, sourceLength, NULL, 0);
-	if (wideLength == 0)
-	{
-		const DWORD error = GetLastError();
-		TRACE("Task target path size conversion failed with Windows error %lu.\n", error);
-		SetLastError(error);
-		return FALSE;
-	}
-
 	std::wstring wideTarget;
 	try
 	{
-		wideTarget.resize(static_cast<size_t>(wideLength));
+		wideTarget.assign(strTargetPath, targetLength);
 	}
 	catch (const std::exception&)
 	{
 		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
 		return FALSE;
 	}
-	if (MultiByteToWideChar(CP_ACP, 0, strTargetPath, sourceLength, &wideTarget[0], wideLength) != wideLength)
-	{
-		const DWORD error = GetLastError();
-		TRACE("Task target path conversion failed with Windows error %lu.\n", error);
-		SetLastError(error);
-		return FALSE;
-	}
-
 	std::string xml;
 	std::string diagnostic;
 	if (!BuildTaskXmlUtf8(wideTarget, &xml, &diagnostic))
 	{
-		TRACE("Task XML serialization failed: %s\n", diagnostic.c_str());
+		TRACE("Task XML serialization failed: %hs\n", diagnostic.c_str());
 		SetLastError(ERROR_INVALID_DATA);
 		return FALSE;
 	}
 
-	HANDLE file = CreateFileA(
+	HANDLE file = CreateFileW(
 		strXmlPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (file == INVALID_HANDLE_VALUE)
 	{
@@ -2257,7 +2481,7 @@ BOOL CClevoFanControlDlg::CreateTaskXml(PCSTR strXmlPath, PCSTR strTargetPath)
 
 	if (failure != ERROR_SUCCESS)
 	{
-		DeleteFileA(strXmlPath);
+		DeleteFileW(strXmlPath);
 		TRACE("Task XML file write failed with Windows error %lu.\n", failure);
 		SetLastError(failure);
 		return FALSE;
