@@ -20,7 +20,14 @@
 Replace the current \`$releaseLookup = gh api ...\` block with:
 
 ~~~powershell
-          $releaseUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
+          $releaseTag = $env:RELEASE_TAG.Trim()
+          $tagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$'
+          if (-not [System.Text.RegularExpressions.Regex]::IsMatch($releaseTag, $tagPattern)) {
+            throw "Release tag '$releaseTag' must use a version such as v1.2.3 or v1.2.3-beta.1."
+          }
+          Write-Output "Release tag validation passed for '$releaseTag'."
+
+          $releaseUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$releaseTag"
           $releaseRequestHeaders = @{
             Accept = 'application/vnd.github+json'
             Authorization = "Bearer $env:GH_TOKEN"
@@ -32,18 +39,27 @@ Replace the current \`$releaseLookup = gh api ...\` block with:
             Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $releaseRequestHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatusCode | Out-Null
           }
           catch {
-            throw "Unable to check whether GitHub Release '$env:RELEASE_TAG' exists: $($_.Exception.Message)"
+            throw "Unable to check whether GitHub Release '$releaseTag' exists: $($_.Exception.Message)"
           }
 
+          Write-Output "Release lookup returned HTTP $releaseStatusCode for '$releaseTag'."
           if ($releaseStatusCode -eq 200) {
-            throw "GitHub Release '$env:RELEASE_TAG' already exists."
+            throw "GitHub Release '$releaseTag' already exists."
           }
           if ($releaseStatusCode -ne 404) {
-            throw "Unable to check whether GitHub Release '$env:RELEASE_TAG' exists: HTTP $releaseStatusCode."
+            throw "Unable to check whether GitHub Release '$releaseTag' exists: HTTP $releaseStatusCode."
           }
 ~~~
 
-Keep the existing semantic-version regex and \`git ls-remote\` checks immediately after this block. Do not modify build, test, package, or publish steps.
+Keep the \`git ls-remote\` check immediately after this block. The build and test steps remain unchanged. Package and publish steps must normalize the same input before using it:
+
+~~~powershell
+$releaseTag = $env:RELEASE_TAG.Trim()
+$packageName = "ClevoFanControl-$releaseTag-win32"
+$arguments = @('release', 'create', $releaseTag, $env:RELEASE_ARCHIVE)
+~~~
+
+The workflow also prints the normalized tag and HTTP status without exposing the token, so a hosted-runner failure identifies the validation phase.
 
 - [ ] **Step 2: Check the workflow diff and whitespace**
 
@@ -69,7 +85,12 @@ Run:
 $ErrorActionPreference = 'Stop'
 $env:GITHUB_REPOSITORY = 'XiaoQing235/ClevoFanControl'
 $env:RELEASE_TAG = 'v1.0.0'
-$releaseUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
+$releaseTag = $env:RELEASE_TAG.Trim()
+$tagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$'
+if (-not [System.Text.RegularExpressions.Regex]::IsMatch($releaseTag, $tagPattern)) {
+  throw "Invalid release tag: $releaseTag"
+}
+$releaseUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$releaseTag"
 $releaseRequestHeaders = @{
   Accept = 'application/vnd.github+json'
   Authorization = "Bearer $env:GH_TOKEN"
@@ -80,11 +101,12 @@ try {
   Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $releaseRequestHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatusCode | Out-Null
 }
 catch {
-  throw "Request failed: $($_.Exception.Message)"
+  throw "Request failed for '$releaseTag': $($_.Exception.Message)"
 }
+Write-Output "Release lookup returned HTTP $releaseStatusCode for '$releaseTag'."
 if ($releaseStatusCode -eq 200) { throw "Release already exists" }
 if ($releaseStatusCode -ne 404) { throw "Unexpected release status: $releaseStatusCode" }
-$remoteTag = git ls-remote --exit-code --tags origin "refs/tags/$env:RELEASE_TAG" 2>&1
+$remoteTag = git ls-remote --exit-code --tags origin "refs/tags/$releaseTag" 2>&1
 if ($LASTEXITCODE -eq 0) { throw "Remote tag already exists: $remoteTag" }
 if ($LASTEXITCODE -ne 2) { throw "Unexpected git ls-remote exit code: $LASTEXITCODE" }
 Write-Output 'VALIDATION_OK'

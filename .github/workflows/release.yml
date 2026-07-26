@@ -40,11 +40,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
 
-          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
-            throw "Release tag '$env:RELEASE_TAG' must use a version such as v1.2.3 or v1.2.3-beta.1."
+          $releaseTag = $env:RELEASE_TAG.Trim()
+          $tagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$'
+          if (-not [System.Text.RegularExpressions.Regex]::IsMatch($releaseTag, $tagPattern)) {
+            throw "Release tag '$releaseTag' must use a version such as v1.2.3 or v1.2.3-beta.1."
           }
+          Write-Output "Release tag validation passed for '$releaseTag'."
 
-          $releaseUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
+          $releaseUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$releaseTag"
           $releaseRequestHeaders = @{
             Accept = 'application/vnd.github+json'
             Authorization = "Bearer $env:GH_TOKEN"
@@ -56,23 +59,24 @@ jobs:
             Invoke-RestMethod -Method Get -Uri $releaseUri -Headers $releaseRequestHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatusCode | Out-Null
           }
           catch {
-            throw "Unable to check whether GitHub Release '$env:RELEASE_TAG' exists: $($_.Exception.Message)"
+            throw "Unable to check whether GitHub Release '$releaseTag' exists: $($_.Exception.Message)"
           }
 
+          Write-Output "Release lookup returned HTTP $releaseStatusCode for '$releaseTag'."
           if ($releaseStatusCode -eq 200) {
-            throw "GitHub Release '$env:RELEASE_TAG' already exists."
+            throw "GitHub Release '$releaseTag' already exists."
           }
           if ($releaseStatusCode -ne 404) {
-            throw "Unable to check whether GitHub Release '$env:RELEASE_TAG' exists: HTTP $releaseStatusCode."
+            throw "Unable to check whether GitHub Release '$releaseTag' exists: HTTP $releaseStatusCode."
           }
 
-          git ls-remote --exit-code --tags origin "refs/tags/$env:RELEASE_TAG" *> $null
+          git ls-remote --exit-code --tags origin "refs/tags/$releaseTag" *> $null
           $tagLookupExitCode = $LASTEXITCODE
           if ($tagLookupExitCode -eq 0) {
-            throw "Remote tag '$env:RELEASE_TAG' already exists."
+            throw "Remote tag '$releaseTag' already exists."
           }
           if ($tagLookupExitCode -ne 2) {
-            throw "Unable to check whether remote tag '$env:RELEASE_TAG' exists (git exit code $tagLookupExitCode)."
+            throw "Unable to check whether remote tag '$releaseTag' exists (git exit code $tagLookupExitCode)."
           }
 
       - name: Configure MSBuild
@@ -101,7 +105,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $packageName = "ClevoFanControl-$env:RELEASE_TAG-win32"
+          $releaseTag = $env:RELEASE_TAG.Trim()
+          $packageName = "ClevoFanControl-$releaseTag-win32"
           $stagingDirectory = Join-Path $env:RUNNER_TEMP $packageName
           $archivePath = Join-Path $env:GITHUB_WORKSPACE "$packageName.zip"
           $releaseFiles = @(
@@ -130,11 +135,12 @@ jobs:
           PRERELEASE: ${{ inputs.prerelease }}
           RELEASE_ARCHIVE: ${{ steps.package.outputs.archive }}
         run: |
+          $releaseTag = $env:RELEASE_TAG.Trim()
           $arguments = @(
-            'release', 'create', $env:RELEASE_TAG, $env:RELEASE_ARCHIVE,
+            'release', 'create', $releaseTag, $env:RELEASE_ARCHIVE,
             '--repo', $env:GITHUB_REPOSITORY,
             '--target', $env:GITHUB_SHA,
-            '--title', "ClevoFanControl $env:RELEASE_TAG",
+            '--title', "ClevoFanControl $releaseTag",
             '--generate-notes'
           )
 

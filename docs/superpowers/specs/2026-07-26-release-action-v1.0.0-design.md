@@ -19,6 +19,8 @@ Replace the release-existence check's text matching with a typed PowerShell HTTP
 
 Keep the tag validation as a separate `git ls-remote --exit-code` check. Exit code 0 remains an existing remote tag; exit code 2 remains an absent tag; any other code is an infrastructure or repository error. This preserves the protection against publishing a requested version against an unexpected existing tag.
 
+Normalize the dispatch input with `Trim()` once before validation and reuse the normalized value for the release lookup, package name, and publish command. Emit the normalized tag and HTTP status as non-secret diagnostics so hosted-runner failures identify the validation phase without exposing the token.
+
 Leave the build, test, packaging, and `gh release create --target $GITHUB_SHA` steps unchanged. After the repair is pushed to `main`, manual dispatch with `tag=v1.0.0` and `prerelease=false` will build the pushed commit. GitHub CLI will create the new tag from the workflow SHA when the release is published.
 
 ## Workflow Data Flow
