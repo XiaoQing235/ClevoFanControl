@@ -9,7 +9,7 @@ fn main() {
             manifest
         };
         r.set_manifest(&manifest);
-        r.set_icon("ClevoFanControl/res/ClevoFanControl.ico");
+        r.set_icon("assets/ClevoFanControl.ico");
         r.compile().expect("compile Windows resources");
     }
 }

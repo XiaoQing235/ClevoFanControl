@@ -642,9 +642,7 @@ pub fn run(
         .with_size(1080, 850)
         .with_label("ClevoFanControl · x64")
         .center_screen();
-    if let Ok(icon) =
-        fltk::image::PngImage::from_data(include_bytes!("../ClevoFanControl/res/Fan.png"))
-    {
+    if let Ok(icon) = fltk::image::PngImage::from_data(include_bytes!("../assets/Fan.png")) {
         win.set_icon(Some(icon));
     }
     win.set_color(PAPER);
@@ -972,12 +970,6 @@ pub fn run(
                     win.hide();
                 }
                 NativeEvent::Exit => tx.send(Action::Exit),
-                NativeEvent::Suspend => {
-                    let _ = worker.tx.send(Command::Suspend);
-                }
-                NativeEvent::Resume => {
-                    let _ = worker.tx.send(Command::Resume);
-                }
             }
         }
         while let Ok(event) = worker.rx.try_recv() {

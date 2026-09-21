@@ -310,8 +310,6 @@ pub enum NativeEvent {
     Show,
     Hide,
     Exit,
-    Suspend,
-    Resume,
 }
 struct TrayState {
     sender: mpsc::Sender<NativeEvent>,

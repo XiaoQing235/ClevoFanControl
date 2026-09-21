@@ -10,9 +10,7 @@ obj/
 # Visual Studio and local build outputs
 Debug/
 Release/
-ClevoFanControl/Debug/
-ClevoFanControl/Release/
-ClevoFanControl/TraceRelease/
+TraceRelease/
 *.obj
 *.pdb
 *.ilk
@@ -24,16 +22,18 @@ ClevoFanControl/TraceRelease/
 *.exe
 *.dll
 
-# Required root-level runtime dependencies
-!/NTPortDrvSetup.exe
-!/ClevoEcInfo.dll
-!/NVGPU_DLL.dll
 docs/
 
 # Rust build and local configuration
 /target/
 /ClevoFanControl.x64.json
+/ClevoFanControl.json
+/ClevoFanControl.presets.json
 *.json.tmp
 
-# Local CodeGraph index
+# Local release archives
+/ClevoFanControl-*.zip
+
+# Local tooling state
 /.codegraph/
+/.hallmark/

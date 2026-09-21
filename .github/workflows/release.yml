@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (for example, v1.0.0)
+        description: Release tag (must match Cargo.toml, for example, v2.0.0)
         required: true
+        default: v2.0.0
         type: string
       prerelease:
         description: Mark the GitHub Release as a prerelease
@@ -23,7 +24,7 @@ concurrency:
 jobs:
   build-and-release:
     name: Build, test, and publish
-    runs-on: windows-2025-vs2026
+    runs-on: windows-2025
 
     steps:
       - name: Check out source
@@ -90,7 +91,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $meta = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if ($env:RELEASE_TAG -ne "v$($meta.packages[0].version)") { throw 'Tag must match Cargo.toml version.' }
           cargo fmt --check
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
