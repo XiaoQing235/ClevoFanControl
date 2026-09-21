@@ -29,3 +29,11 @@ ClevoFanControl/TraceRelease/
 !/ClevoEcInfo.dll
 !/NVGPU_DLL.dll
 docs/
+
+# Rust build and local configuration
+/target/
+/ClevoFanControl.x64.json
+*.json.tmp
+
+# Local CodeGraph index
+/.codegraph/

@@ -80,22 +80,25 @@ jobs:
             throw "Remote tag '$releaseTag' already exists."
           }
 
-      - name: Configure MSBuild
-        uses: microsoft/setup-msbuild@v3
-
-      - name: Build Release Win32
+      - name: Configure Rust
         shell: pwsh
-        run: >-
-          msbuild ClevoFanControl.sln
-          /m
-          /t:Rebuild
-          /p:Configuration=Release
-          /p:Platform=Win32
+        run: rustup show
 
-      - name: Run tests
+      - name: Check, test and build x64
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          & .\Release\ClevoFanControlTests.exe
+          $ErrorActionPreference = 'Stop'
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          if ($env:RELEASE_TAG -ne "v$($meta.packages[0].version)") { throw 'Tag must match Cargo.toml version.' }
+          cargo fmt --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --locked --release --target x86_64-pc-windows-msvc
           exit $LASTEXITCODE
 
       - name: Package release
@@ -107,14 +110,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           $releaseTag = $env:RELEASE_TAG.Trim()
-          $packageName = "ClevoFanControl-$releaseTag-win32"
+          $packageName = "ClevoFanControl-$releaseTag-x64"
           $stagingDirectory = Join-Path $env:RUNNER_TEMP $packageName
           $archivePath = Join-Path $env:GITHUB_WORKSPACE "$packageName.zip"
           $releaseFiles = @(
-            '.\Release\ClevoFanControl.exe'
-            '.\NVGPU_DLL.dll'
-            '.\NTPortDrvSetup.exe'
-            '.\ClevoEcInfo.dll'
+            '.\target\x86_64-pc-windows-msvc\release\clevo-fan-control.exe'
+            '.\README.md'
+            '.\THIRD_PARTY_NOTICES.md'
           )
 
           New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
@@ -125,6 +127,7 @@ jobs:
             Copy-Item -LiteralPath $file -Destination $stagingDirectory
           }
 
+          Copy-Item -LiteralPath '.\licenses' -Destination $stagingDirectory -Recurse
           Compress-Archive -Path (Join-Path $stagingDirectory '*') -DestinationPath $archivePath -CompressionLevel Optimal
           "archive=$archivePath" >> $env:GITHUB_OUTPUT
 
